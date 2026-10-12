@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Use MSBuild-evaluated project properties** — the project version, the name of project
+  references (`PackageId`) and test-project detection (`IsTestProject`) are now evaluated with
+  `dotnet msbuild -getProperty`, so values from `Directory.Build.props` and other imports,
+  property references and `VersionPrefix` are honored. Previously only literal values in the
+  project file were read, which produced `0.0.0` root versions, duplicate `-rs -ipr` project
+  nodes with unresolved `$(…)` versions, and test projects missed by `--exclude-test-projects`.
+  The project file is still read when the evaluation fails or yields the SDK default `1.0.0`
+
 ## [6.3.1] - 2026-10-12
 
 ### Fixed

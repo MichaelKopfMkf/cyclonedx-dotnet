@@ -261,8 +261,11 @@ to keep the graph consistent.
 ### With `--include-project-references`
 
 Project-type entries are resolved to `Component` objects (Type: Library) using metadata
-read directly from the `.csproj`/`.fsproj`/`.vbproj` XML. Version is sourced from
-`<Version>`, or `AssemblyVersion` in `AssemblyInfo.cs`, or `"1.0.0"` as fallback. These
+evaluated by MSBuild: the name is `PackageId` (falling back to `AssemblyName`), matching the
+names NuGet writes to `project.assets.json`, and the version is `Version`. Values from imports
+such as `Directory.Build.props` are therefore included. If the evaluation fails or yields the
+SDK default version `1.0.0`, the `.csproj`/`.fsproj`/`.vbproj` XML is read instead: version is
+sourced from `<Version>`, or `AssemblyVersion` in `AssemblyInfo.cs`, or `"1.0.0"` as fallback. These
 components normally get a `BomRef` of `<name>@<version>` but no NuGet PURL.
 Only valid when the input is a project file.
 
