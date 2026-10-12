@@ -999,5 +999,19 @@ namespace CycloneDX.Tests
 
             dotnetUtils.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()), Times.Once);
         }
+
+        [Fact]
+        public void EvaluatedProperties_UseEvaluationFrameworkAndConfiguration()
+        {
+            var (svc, dotnetUtils) = CreateProjectFileServiceWithEvaluatedProperties(
+                "<Project><PropertyGroup /></Project>",
+                new Dictionary<string, string> { ["Version"] = "2.0.0" });
+            svc.EvaluationFramework = "net8.0";
+            svc.EvaluationConfiguration = "Release";
+
+            svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
+
+            dotnetUtils.Verify(m => m.GetProjectProperties(XFS.Path(@"c:\P\P.csproj"), It.IsAny<IEnumerable<string>>(), "net8.0", "Release"), Times.Once);
+        }
     }
 }

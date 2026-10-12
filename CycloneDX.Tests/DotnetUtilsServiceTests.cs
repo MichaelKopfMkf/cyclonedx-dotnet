@@ -280,5 +280,59 @@ namespace CycloneDX.Tests
 
             Assert.False(result.Success);
         }
+
+        [Fact]
+        public void GetProjectProperties_WithFrameworkAndConfiguration_PassesThemAsGlobalProperties()
+        {
+            string capturedArguments = null;
+            var dotnetCommandService = new Mock<IDotnetCommandService>();
+            dotnetCommandService
+                .Setup(m => m.Run(It.IsAny<string>()))
+                .Callback<string>(args => capturedArguments = args)
+                .Returns(new DotnetCommandResult { ExitCode = 0, StdOut = "{ \"Properties\": { \"Version\": \"2.0.0\", \"PackageId\": \"P\" } }" });
+
+            var dotnetUtilsService = new DotnetUtilsService(
+                new MockFileSystem(), dotnetCommandService.Object);
+
+            dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" }, "net8.0", "Release");
+
+            Assert.Contains("-p:TargetFramework=net8.0", capturedArguments);
+            Assert.Contains("-p:Configuration=Release", capturedArguments);
+        }
+
+        [Fact]
+        public void GetProjectProperties_WithoutFrameworkAndConfiguration_PassesNoGlobalProperties()
+        {
+            string capturedArguments = null;
+            var dotnetCommandService = new Mock<IDotnetCommandService>();
+            dotnetCommandService
+                .Setup(m => m.Run(It.IsAny<string>()))
+                .Callback<string>(args => capturedArguments = args)
+                .Returns(new DotnetCommandResult { ExitCode = 0, StdOut = "{ \"Properties\": { \"Version\": \"2.0.0\", \"PackageId\": \"P\" } }" });
+
+            var dotnetUtilsService = new DotnetUtilsService(
+                new MockFileSystem(), dotnetCommandService.Object);
+
+            dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" }, "", null);
+
+            Assert.DoesNotContain("-p:", capturedArguments);
+        }
+
+        [Fact]
+        public void GetProjectProperties_MsbuildFailsWithErrorOnStdOut_ReturnsStdOutAsErrorMessage()
+        {
+            var dotnetCommandService = new Mock<IDotnetCommandService>();
+            dotnetCommandService
+                .Setup(m => m.Run(It.IsAny<string>()))
+                .Returns(new DotnetCommandResult { ExitCode = 1, StdErr = "", StdOut = "MSBUILD : error MSB1001: Unknown switch." });
+
+            var dotnetUtilsService = new DotnetUtilsService(
+                new MockFileSystem(), dotnetCommandService.Object);
+
+            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" }, null, null);
+
+            Assert.False(result.Success);
+            Assert.Contains("MSB1001", result.ErrorMessage);
+        }
     }
 }

@@ -41,7 +41,7 @@ namespace CycloneDX.Tests.FunctionalTests
             });
         }
 
-        private static IDotnetUtilsService GetDotnetUtilsService()
+        private static Mock<IDotnetUtilsService> GetDotnetUtilsService()
         {
             // keyed by project name, the runner passes normalized full paths
             var evaluatedProperties = new Dictionary<string, Dictionary<string, string>>
@@ -60,7 +60,7 @@ namespace CycloneDX.Tests.FunctionalTests
             dotnetUtilsService
                 .Setup(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()))
                 .Returns((string path, IEnumerable<string> _, string _, string _) => new DotnetUtilsResult<Dictionary<string, string>> { Result = evaluatedProperties[Path.GetFileNameWithoutExtension(path)] });
-            return dotnetUtilsService.Object;
+            return dotnetUtilsService;
         }
 
         [Fact]
@@ -68,7 +68,7 @@ namespace CycloneDX.Tests.FunctionalTests
         {
             var options = new RunOptions { SolutionOrProjectFile = AppPath };
 
-            var bom = await FunctionalTestHelper.Test(options, GetDotnetUtilsService(), GetMockFS());
+            var bom = await FunctionalTestHelper.Test(options, GetDotnetUtilsService().Object, GetMockFS());
 
             Assert.Equal("4.5.6", bom.Metadata.Component.Version);
         }
@@ -84,7 +84,7 @@ namespace CycloneDX.Tests.FunctionalTests
                 SolutionOrProjectFile = AppPath
             };
 
-            var bom = await FunctionalTestHelper.Test(options, GetDotnetUtilsService(), GetMockFS());
+            var bom = await FunctionalTestHelper.Test(options, GetDotnetUtilsService().Object, GetMockFS());
 
             var lib = Assert.Single(bom.Components, c => c.Type == Component.Classification.Library && c.Name != "log4net");
             Assert.Equal("Contoso.Foo.Bar.Lib", lib.Name);
@@ -93,6 +93,18 @@ namespace CycloneDX.Tests.FunctionalTests
             Assert.DoesNotContain(bom.Components, c => c.Version.Contains("$("));
             FunctionalTestHelper.AssertHasDependencyWithChild(bom, "pkg:nuget/Foo.Bar.App@4.5.6", "pkg:nuget/Contoso.Foo.Bar.Lib@7.0.0");
             FunctionalTestHelper.AssertHasDependencyWithChild(bom, "pkg:nuget/Contoso.Foo.Bar.Lib@7.0.0", "pkg:nuget/log4net@2.0.15");
+        }
+
+        [Fact]
+        public async Task EvaluationUsesConfigurationAndFrameworkOptions()
+        {
+            var options = new RunOptions { SolutionOrProjectFile = AppPath, configuration = "Release", framework = "net8.0" };
+            var dotnetUtilsService = GetDotnetUtilsService();
+
+            await FunctionalTestHelper.Test(options, dotnetUtilsService.Object, GetMockFS());
+
+            dotnetUtilsService.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), "net8.0", "Release"), Times.AtLeastOnce);
+            dotnetUtilsService.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.Is<string>(f => f != "net8.0"), It.IsAny<string>()), Times.Never);
         }
     }
 }
