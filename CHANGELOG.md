@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   property references and `VersionPrefix` are honored. Previously only literal values in the
   project file were read, which produced `0.0.0` root versions, duplicate `-rs -ipr` project
   nodes with unresolved `$(…)` versions, and test projects missed by `--exclude-test-projects`.
-  The project file is still read when the evaluation fails or yields the SDK default `1.0.0`
+  `--configuration` and `--framework` are passed to the evaluation. The project file is still read
+  when the evaluation fails, with a notice naming the project and the MSBuild error, or when it
+  yields the SDK default `1.0.0`
 
 ## [6.3.1] - 2026-10-12
 

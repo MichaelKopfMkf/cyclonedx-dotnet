@@ -99,12 +99,16 @@ not provided, the tool asks MSBuild for the evaluated `Version` property
 (`dotnet msbuild -getProperty`) and uses it as the metadata component version.
 The evaluation also sees values set in imported files such as `Directory.Build.props`,
 property references (e.g. `$(Major).5.6`) and `VersionPrefix`/`VersionSuffix`.
+`--configuration` and `--framework` are passed to the evaluation as `-p:Configuration` and
+`-p:TargetFramework`, like to `dotnet restore`, so conditional values (e.g. a version that is
+only set for `Release`) resolve as in that build.
 
 MSBuild evaluates `Version` to `1.0.0` when nothing sets it, which cannot be told
 apart from an explicit `1.0.0`. In that case, or when the evaluation fails (e.g. for
 non-SDK projects without the required targets), the tool reads the version from the
-project file XML instead. It checks the following XML properties in priority order,
-using the first one that has a value:
+project file XML instead; a failed evaluation prints a notice naming the project and the
+MSBuild error. It checks the following XML properties in priority order, using the first one
+that has a value:
 
 | Priority | Property | Typical use |
 |---|---|---|
