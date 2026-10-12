@@ -113,7 +113,7 @@ namespace CycloneDX.Services
 
         /// <summary>
         /// Evaluates the project together with all projects queued so far, because every evaluation
-        /// starts a dotnet process; one per project would make large solutions slow.
+        /// loads the imports of the SDK anew; one per project would make large solutions slow.
         /// </summary>
         private DotnetUtilsResult<EvaluatedProject> Evaluate(string projectFilePath)
         {

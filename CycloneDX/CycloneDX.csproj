@@ -36,6 +36,8 @@
     <PackageReference Include="NuGet.ProjectModel" />
     <PackageReference Include="System.IO.Abstractions" />
     <PackageReference Include="System.CommandLine" />
+    <!-- Only to compile against; the MSBuild of the .NET SDK is loaded at runtime -->
+    <PackageReference Include="Microsoft.Build" ExcludeAssets="runtime" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>

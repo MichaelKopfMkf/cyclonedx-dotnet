@@ -20,26 +20,34 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Abstractions;
 using System.Linq;
-using System.Text;
-using System.Text.Json;
-using System.Xml.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 using CycloneDX.Interfaces;
 using CycloneDX.Models;
 
 namespace CycloneDX.Services
 {
     /// <summary>
-    /// Evaluates projects with "dotnet msbuild" and a generated helper project. The helper project calls a
-    /// target in every project that returns the requested values. The target is added to the projects
-    /// through the CustomAfterMicrosoftCommon(CrossTargeting)Targets hooks of the .NET SDK.
+    /// Evaluates projects in this process with the MSBuild of the .NET SDK that the dotnet CLI uses. MSBuild and
+    /// the other assemblies of the SDK are loaded into a load context of their own, so that they get the versions
+    /// they were built with instead of those CycloneDX ships, e.g. of NuGet.Frameworks.
     /// </summary>
     public sealed class ProjectEvaluationService : IProjectEvaluationService
     {
-        private const string EvaluateTarget = "CycloneDXEvaluate";
-        private const string GetValuesTarget = "CycloneDXGetProjectValues";
+        // Loaded by name, so that its MSBuild types never load into the default load context
+        private const string EvaluatorTypeName = "CycloneDX.Services.MSBuildEvaluator";
+
+        // MSBuild cannot be unloaded, so it is loaded once per SDK directory and process
+        private static readonly Dictionary<string, Evaluator> Evaluators = new Dictionary<string, Evaluator>(StringComparer.Ordinal);
 
         private readonly IFileSystem _fileSystem;
         private readonly IDotnetCommandService _dotnetCommandService;
+        private DotnetUtilsResult<string> _sdkDirectory;
+
+        // The signature of MSBuildEvaluator.Evaluate; only BCL types cross the load context boundary
+        private delegate List<(Dictionary<string, string> Properties, Dictionary<string, string[]> Items, string Error)> Evaluator(
+            string[] projectFilePaths, string[] propertyNames, string[] itemTypes, Dictionary<string, string> globalProperties);
 
         public ProjectEvaluationService(IFileSystem fileSystem, IDotnetCommandService dotnetCommandService)
         {
@@ -57,178 +65,161 @@ namespace CycloneDX.Services
                 return new Dictionary<string, DotnetUtilsResult<EvaluatedProject>>(StringComparer.OrdinalIgnoreCase);
             }
 
-            var fullPaths = projects.ToDictionary(project => project, _fileSystem.Path.GetFullPath, StringComparer.OrdinalIgnoreCase);
-            var evaluateProject = _fileSystem.Path.Combine(_fileSystem.Path.GetTempPath(), "cyclonedx-" + Guid.NewGuid().ToString("N"), "evaluate.proj");
-            var commandResult = Run(evaluateProject, fullPaths.Values, propertyNames, itemTypes, framework, configuration);
-            var output = commandResult.StdOut ?? "";
-            // -getTargetResult writes the JSON after the log
-            var jsonStart = ("\n" + output).IndexOf("\n{", StringComparison.Ordinal);
-            var evaluatedProjects = jsonStart < 0
-                ? new Dictionary<string, EvaluatedProject>()
-                : ParseTargetResult(output.Substring(jsonStart), propertyNames.ToList(), itemTypes.ToList());
-
-            var logLines = ((jsonStart < 0 ? output : output.Substring(0, jsonStart)) + "\n" + commandResult.StdErr)
-                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(line => line.Trim())
-                .ToList();
-            var errors = logLines
-                .Where(line => line.Contains(": error ", StringComparison.Ordinal))
-                .Select(line => WithoutLocationIn(line, evaluateProject))
-                .ToList();
-            if (errors.Count == 0 && !commandResult.Success)
+            _sdkDirectory ??= GetSdkDirectory();
+            if (!_sdkDirectory.Success)
             {
-                // e.g. the timeout message
-                errors = logLines;
+                return Failed(projects, _sdkDirectory.ErrorMessage);
             }
 
-            return projects.ToDictionary(
-                project => project,
-                project => evaluatedProjects.TryGetValue(fullPaths[project], out var evaluatedProject)
-                    ? new DotnetUtilsResult<EvaluatedProject> { Result = evaluatedProject }
-                    : new DotnetUtilsResult<EvaluatedProject> { ErrorMessage = GetErrorMessage(fullPaths[project], fullPaths.Values, errors) },
+            // Passed like to `dotnet restore`
+            var globalProperties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(framework))
+            {
+                globalProperties["TargetFramework"] = framework;
+            }
+            if (!string.IsNullOrEmpty(configuration))
+            {
+                globalProperties["Configuration"] = configuration;
+            }
+
+            List<(Dictionary<string, string> Properties, Dictionary<string, string[]> Items, string Error)> evaluations;
+            try
+            {
+                evaluations = GetEvaluator(_sdkDirectory.Result)(
+                    projects.Select(_fileSystem.Path.GetFullPath).ToArray(), propertyNames.ToArray(), itemTypes.ToArray(), globalProperties);
+            }
+            catch (Exception exception)
+            {
+                // e.g. MSBuild cannot be loaded; the project files are read instead
+                return Failed(projects, OneLine($"MSBuild of the .NET SDK in {_sdkDirectory.Result} failed: {exception.Message}"));
+            }
+
+            return projects.Zip(evaluations).ToDictionary(
+                evaluation => evaluation.First,
+                evaluation => evaluation.Second.Error is null
+                    ? new DotnetUtilsResult<EvaluatedProject> { Result = ToEvaluatedProject(evaluation.Second.Properties, evaluation.Second.Items) }
+                    : new DotnetUtilsResult<EvaluatedProject> { ErrorMessage = OneLine(evaluation.Second.Error) },
                 StringComparer.OrdinalIgnoreCase);
         }
 
-        private DotnetCommandResult Run(string evaluateProject, IEnumerable<string> projects, IEnumerable<string> propertyNames,
-            IEnumerable<string> itemTypes, string framework, string configuration)
+        /// <summary>
+        /// The directory of the .NET SDK that the dotnet CLI uses in the current directory, as selected by global.json,
+        /// like for `dotnet restore`. Fails when this .NET runtime cannot run the MSBuild of the SDK.
+        /// </summary>
+        internal DotnetUtilsResult<string> GetSdkDirectory()
         {
-            var directory = _fileSystem.Path.GetDirectoryName(evaluateProject);
-            _fileSystem.Directory.CreateDirectory(directory);
-            try
+            var version = _dotnetCommandService.Run("--version");
+            var sdks = version.Success ? _dotnetCommandService.Run("--list-sdks") : version;
+            if (!sdks.Success)
             {
-                _fileSystem.File.WriteAllText(_fileSystem.Path.Combine(directory, "cyclonedx.targets"), CreateTargets(propertyNames, itemTypes));
-                _fileSystem.File.WriteAllText(evaluateProject, CreateEvaluateProject(projects));
-
-                var arguments = $"msbuild \"{evaluateProject}\" -nologo -v:quiet -nodeReuse:false -getTargetResult:{EvaluateTarget}";
-                if (!string.IsNullOrEmpty(framework))
-                {
-                    arguments = $"{arguments} -p:TargetFramework={framework}";
-                }
-                if (!string.IsNullOrEmpty(configuration))
-                {
-                    arguments = $"{arguments} -p:Configuration={configuration}";
-                }
-                return _dotnetCommandService.Run(arguments);
+                var message = string.IsNullOrWhiteSpace(sdks.StdErr) ? sdks.StdOut : sdks.StdErr;
+                return new DotnetUtilsResult<string> { ErrorMessage = OneLine($"Could not determine the .NET SDK: {message}") };
             }
-            finally
+
+            var sdkVersion = version.StdOut.Trim();
+            // e.g. "10.0.100 [C:\Program Files\dotnet\sdk]"
+            var sdkDirectory = sdks.StdOut
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(line => line.StartsWith(sdkVersion + " [", StringComparison.Ordinal) && line.EndsWith(']'))
+                .Select(line => _fileSystem.Path.Combine(line.Substring(sdkVersion.Length + 2, line.Length - sdkVersion.Length - 3), sdkVersion))
+                .FirstOrDefault();
+            if (sdkDirectory is null)
             {
-                try
+                return new DotnetUtilsResult<string> { ErrorMessage = $"Could not find the .NET SDK {sdkVersion}" };
+            }
+
+            // The MSBuild of an SDK targets the .NET of the same major version
+            if (!int.TryParse(sdkVersion.Split('.')[0], out var sdkMajorVersion) || sdkMajorVersion > Environment.Version.Major)
+            {
+                return new DotnetUtilsResult<string>
                 {
-                    _fileSystem.Directory.Delete(directory, true);
-                }
-                catch (IOException)
+                    ErrorMessage = $"The MSBuild of the .NET SDK {sdkVersion} cannot run on .NET {Environment.Version}, which runs CycloneDX"
+                };
+            }
+            return new DotnetUtilsResult<string> { Result = sdkDirectory };
+        }
+
+        private static Evaluator GetEvaluator(string sdkDirectory)
+        {
+            lock (Evaluators)
+            {
+                if (!Evaluators.TryGetValue(sdkDirectory, out var evaluator))
                 {
-                    // only a few small files in the temp directory are left behind
+                    // A second instance of this assembly, whose references resolve to the SDK
+                    evaluator = new SdkLoadContext(sdkDirectory)
+                        .LoadFromAssemblyPath(typeof(ProjectEvaluationService).Assembly.Location)
+                        .GetType(EvaluatorTypeName, throwOnError: true)
+                        .GetMethod("Evaluate")
+                        .CreateDelegate<Evaluator>();
+                    Evaluators[sdkDirectory] = evaluator;
                 }
+                return evaluator;
             }
         }
 
-        // Imported into every project; returns the project path with the values as metadata
-        private static string CreateTargets(IEnumerable<string> propertyNames, IEnumerable<string> itemTypes)
+        private static EvaluatedProject ToEvaluatedProject(Dictionary<string, string> properties, Dictionary<string, string[]> items)
         {
-            var values = new XElement("_CycloneDXProjectValues", new XAttribute("Include", "$(MSBuildProjectFullPath)"));
-            values.Add(propertyNames.Select(name => new XAttribute(name, $"$({name})")));
-            values.Add(itemTypes.Select(itemType => new XAttribute(itemType, $"@({itemType})")));
-            return new XElement("Project",
-                new XElement("Target",
-                    new XAttribute("Name", GetValuesTarget),
-                    new XAttribute("Returns", "@(_CycloneDXProjectValues)"),
-                    new XElement("ItemGroup", values))).ToString();
+            var evaluatedProject = new EvaluatedProject();
+            foreach (var property in properties)
+            {
+                evaluatedProject.Properties[property.Key] = property.Value;
+            }
+            foreach (var item in items)
+            {
+                evaluatedProject.Items[item.Key] = item.Value;
+            }
+            return evaluatedProject;
         }
 
-        // Calls the target in each project separately, so that a project that cannot be loaded does not stop the others
-        private static string CreateEvaluateProject(IEnumerable<string> projects)
+        private static Dictionary<string, DotnetUtilsResult<EvaluatedProject>> Failed(IEnumerable<string> projects, string errorMessage)
         {
-            const string targets = "$(MSBuildThisFileDirectory)cyclonedx.targets";
-            return new XElement("Project",
-                new XElement("ItemGroup", projects.Select(project =>
-                    new XElement("ProjectToEvaluate", new XAttribute("Include", EscapeForMsbuild(project))))),
-                new XElement("Target",
-                    new XAttribute("Name", EvaluateTarget),
-                    new XAttribute("Returns", "@(EvaluatedProject)"),
-                    new XElement("MSBuild",
-                        new XAttribute("Projects", "%(ProjectToEvaluate.Identity)"),
-                        new XAttribute("Targets", GetValuesTarget),
-                        new XAttribute("Properties", $"CustomAfterMicrosoftCommonTargets={targets};CustomAfterMicrosoftCommonCrossTargetingTargets={targets}"),
-                        new XAttribute("ContinueOnError", "ErrorAndContinue"),
-                        new XElement("Output",
-                            new XAttribute("TaskParameter", "TargetOutputs"),
-                            new XAttribute("ItemName", "EvaluatedProject"))))).ToString();
+            return projects.ToDictionary(
+                project => project,
+                _ => new DotnetUtilsResult<EvaluatedProject> { ErrorMessage = errorMessage },
+                StringComparer.OrdinalIgnoreCase);
         }
 
-        // MSBuild would otherwise expand these characters in the item include, e.g. split the path at a ';'
-        private static string EscapeForMsbuild(string value)
+        private static string OneLine(string message)
         {
-            var escaped = new StringBuilder();
-            foreach (var character in value)
-            {
-                escaped.Append("%$@;'?*".Contains(character)
-                    ? $"%{(int)character:X2}"
-                    : character.ToString());
-            }
-            return escaped.ToString();
-        }
-
-        /// <summary>The evaluated projects by full path.</summary>
-        private static Dictionary<string, EvaluatedProject> ParseTargetResult(string json, List<string> propertyNames, List<string> itemTypes)
-        {
-            var evaluatedProjects = new Dictionary<string, EvaluatedProject>(StringComparer.OrdinalIgnoreCase);
-            JsonDocument document;
-            try
-            {
-                // reads only the JSON value, in case MSBuild writes something after it
-                var reader = new Utf8JsonReader(Encoding.UTF8.GetBytes(json));
-                document = JsonDocument.ParseValue(ref reader);
-            }
-            catch (JsonException)
-            {
-                return evaluatedProjects;
-            }
-
-            using (document)
-            {
-                if (!document.RootElement.TryGetProperty("TargetResults", out var targetResults)
-                    || !targetResults.TryGetProperty(EvaluateTarget, out var targetResult)
-                    || !targetResult.TryGetProperty("Items", out var items))
-                {
-                    return evaluatedProjects;
-                }
-                foreach (var item in items.EnumerateArray().Where(item => item.TryGetProperty("Identity", out _)))
-                {
-                    var evaluatedProject = new EvaluatedProject();
-                    foreach (var name in propertyNames.Where(name => item.TryGetProperty(name, out _)))
-                    {
-                        evaluatedProject.Properties[name] = item.GetProperty(name).GetString();
-                    }
-                    foreach (var itemType in itemTypes.Where(itemType => item.TryGetProperty(itemType, out _)))
-                    {
-                        evaluatedProject.Items[itemType] = item.GetProperty(itemType).GetString()
-                            .Split(';', StringSplitOptions.RemoveEmptyEntries);
-                    }
-                    evaluatedProjects[item.GetProperty("Identity").GetString()] = evaluatedProject;
-                }
-            }
-            return evaluatedProjects;
-        }
-
-        // The generated project is deleted, so its path and line only confuse, e.g. for a missing project file
-        private static string WithoutLocationIn(string line, string file)
-        {
-            var messageStart = line.StartsWith(file, StringComparison.OrdinalIgnoreCase)
-                ? line.IndexOf(": ", file.Length, StringComparison.Ordinal)
-                : -1;
-            return messageStart < 0 ? line : line.Substring(messageStart + 2);
+            return string.Join(" ", message.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Select(line => line.Trim()));
         }
 
         /// <summary>
-        /// The error MSBuild reported for the project; otherwise an error that names none of the projects, such
-        /// as an unknown command line switch of an older .NET SDK.
+        /// Loads the assemblies that the .NET SDK ships from its directory, except those that are part of the .NET
+        /// runtime, which the SDK also uses from the runtime. Everything else comes from the default load context.
         /// </summary>
-        private static string GetErrorMessage(string project, IEnumerable<string> projects, List<string> errors)
+        private sealed class SdkLoadContext : AssemblyLoadContext
         {
-            return errors.FirstOrDefault(error => error.Contains(project, StringComparison.OrdinalIgnoreCase))
-                ?? errors.FirstOrDefault(error => !projects.Any(other => error.Contains(other, StringComparison.OrdinalIgnoreCase)))
-                ?? "MSBuild did not evaluate the project";
+            private readonly string _sdkDirectory;
+
+            public SdkLoadContext(string sdkDirectory) : base($"MSBuild of {sdkDirectory}")
+            {
+                _sdkDirectory = sdkDirectory;
+                // MSBuild loads SDK resolvers into load contexts that leave the MSBuild assemblies to the default context
+                AppDomain.CurrentDomain.AssemblyResolve += (_, args) =>
+                {
+                    var name = new AssemblyName(args.Name);
+                    return (name.Name == "MSBuild" || name.Name.StartsWith("Microsoft.Build", StringComparison.Ordinal))
+                        && GetSdkAssemblyPath(name) != null
+                        ? LoadFromAssemblyName(name)
+                        : null;
+                };
+            }
+
+            protected override Assembly Load(AssemblyName assemblyName)
+            {
+                var path = GetSdkAssemblyPath(assemblyName);
+                return path is null ? null : LoadFromAssemblyPath(path);
+            }
+
+            private string GetSdkAssemblyPath(AssemblyName assemblyName)
+            {
+                var fileName = assemblyName.Name + ".dll";
+                var path = Path.Combine(_sdkDirectory, assemblyName.CultureName ?? string.Empty, fileName);
+                return File.Exists(path) && !File.Exists(Path.Combine(RuntimeEnvironment.GetRuntimeDirectory(), fileName))
+                    ? path
+                    : null;
+            }
         }
     }
 }
