@@ -51,13 +51,28 @@ namespace CycloneDX
                       IProjectFileService projectFileService,
                       ISolutionFileService solutionFileService,
                       INugetServiceFactory nugetServiceFactory)
+            : this(fileSystem, dotnetCommandService, projectAssetsFileService, dotnetUtilsService, packagesFileService,
+                   projectFileService, solutionFileService, nugetServiceFactory, null)
+        {
+        }
+
+        public Runner(IFileSystem fileSystem,
+                      IDotnetCommandService dotnetCommandService,
+                      IProjectAssetsFileService projectAssetsFileService,
+                      IDotnetUtilsService dotnetUtilsService,
+                      IPackagesFileService packagesFileService,
+                      IProjectFileService projectFileService,
+                      ISolutionFileService solutionFileService,
+                      INugetServiceFactory nugetServiceFactory,
+                      IProjectEvaluationService projectEvaluationService)
         {
             this.fileSystem = fileSystem ?? new FileSystem();
             this.dotnetCommandService = dotnetCommandService ?? new DotnetCommandService();
             projectAssetsFileService ??= new ProjectAssetsFileService(this.fileSystem, () => new AssetFileReader());
             this.dotnetUtilsService = dotnetUtilsService ?? new DotnetUtilsService(this.fileSystem, this.dotnetCommandService);
             this.packagesFileService = packagesFileService ?? new PackagesFileService(this.fileSystem);
-            this.projectFileService = projectFileService ?? new ProjectFileService(this.fileSystem, this.dotnetUtilsService, this.packagesFileService, projectAssetsFileService);
+            this.projectFileService = projectFileService ?? new ProjectFileService(this.fileSystem, this.dotnetUtilsService, this.packagesFileService, projectAssetsFileService,
+                projectEvaluationService ?? new ProjectEvaluationService());
             this.solutionFileService = solutionFileService ?? new SolutionFileService(this.fileSystem, this.projectFileService);
             this.nugetServiceFactory = nugetServiceFactory ?? new NugetV3ServiceFactory();
         }

@@ -9,14 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Use MSBuild-evaluated project properties** — the project version, the name of project
-  references (`PackageId`) and test-project detection (`IsTestProject`) are now evaluated with
-  `dotnet msbuild -getProperty`, so values from `Directory.Build.props` and other imports,
-  property references and `VersionPrefix` are honored. Previously only literal values in the
-  project file were read, which produced `0.0.0` root versions, duplicate `-rs -ipr` project
-  nodes with unresolved `$(…)` versions, and test projects missed by `--exclude-test-projects`.
-  `--configuration` and `--framework` are passed to the evaluation. The project file is still read
-  when the evaluation fails, with a notice naming the project and the MSBuild error, or when it
+- **Use MSBuild-evaluated project properties** (fixes #669) — the project version, the name of
+  project references (`PackageId`) and test-project detection (`IsTestProject`) are now evaluated
+  in-process with the MSBuild of the .NET SDK the dotnet CLI resolves (via MSBuildLocator), so
+  values from `Directory.Build.props` and other imports, property references and `VersionPrefix`
+  are honored. Previously only literal values in the project file were read, which produced
+  `0.0.0` root versions, duplicate `-rs -ipr` project nodes with unresolved `$(…)` versions, and
+  test projects missed by `--exclude-test-projects`. `--configuration` and `--framework` are
+  passed to the evaluation. Each project file is evaluated and parsed once; the project file is
+  still read when the evaluation fails, with a notice naming the project and the MSBuild error,
+  when the SDK needs a newer runtime than the one running CycloneDX, or when the evaluation
   yields the SDK default `1.0.0`
 
 ## [6.3.1] - 2026-10-12

@@ -13,6 +13,8 @@
     <TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>
     <RollForward>Major</RollForward>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- NuGet.Frameworks is needed at runtime to read assets files; MSBuild of the SDK is still loaded via MSBuildLocator -->
+    <DisableMSBuildAssemblyCopyCheck>true</DisableMSBuildAssemblyCopyCheck>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(OsEnvironment )'=='windows'">
@@ -36,6 +38,9 @@
     <PackageReference Include="NuGet.ProjectModel" />
     <PackageReference Include="System.IO.Abstractions" />
     <PackageReference Include="System.CommandLine" />
+    <!-- MSBuild of the installed .NET SDK is loaded at runtime with MSBuildLocator; it must not be shipped -->
+    <PackageReference Include="Microsoft.Build" ExcludeAssets="runtime" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Build.Locator" />
   </ItemGroup>
 
   <ItemGroup>

@@ -18,7 +18,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Xml;
 using System.IO;
 using System.IO.Abstractions;
 using System.Threading.Tasks;
@@ -38,63 +37,64 @@ namespace CycloneDX.Services
 
     public class ProjectFileService : IProjectFileService
     {
-        private XmlReaderSettings _xmlReaderSettings = new XmlReaderSettings
-        {
-            Async = true
-        };
-
         // SDK-style projects evaluate Version to 1.0.0 when nothing sets it. That cannot be told
         // apart from an explicit 1.0.0, so it is treated as unset and the project file fallbacks apply.
         private const string MSBuildDefaultVersion = "1.0.0";
-        private static readonly string[] EvaluatedPropertyNames = { "Version", "PackageId", "AssemblyName", "IsTestProject" };
+
+        // Requested together, so each project is evaluated once
+        private static readonly string[] EvaluatedPropertyNames = { "Version", "PackageId", "AssemblyName", "IsTestProject", "ProjectAssetsFile" };
 
         private IFileSystem _fileSystem;
         private IDotnetUtilsService _dotnetUtilsService;
         private IPackagesFileService _packagesFileService;
         private IProjectAssetsFileService _projectAssetsFileService;
-        private readonly Dictionary<string, Dictionary<string, string>> _evaluatedProperties = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+        private readonly IProjectEvaluationService _projectEvaluationService;
+        private readonly Dictionary<string, ProjectEvaluation> _projects = new Dictionary<string, ProjectEvaluation>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _reportedEvaluationErrors = new HashSet<string>(StringComparer.Ordinal);
 
+        /// <summary>Reads projects from their project file XML only, without MSBuild evaluation.</summary>
         public ProjectFileService(
             IFileSystem fileSystem,
             IDotnetUtilsService dotnetUtilsService,
             IPackagesFileService packagesFileService,
             IProjectAssetsFileService projectAssetsFileService)
+            : this(fileSystem, dotnetUtilsService, packagesFileService, projectAssetsFileService, null)
+        {
+        }
+
+        public ProjectFileService(
+            IFileSystem fileSystem,
+            IDotnetUtilsService dotnetUtilsService,
+            IPackagesFileService packagesFileService,
+            IProjectAssetsFileService projectAssetsFileService,
+            IProjectEvaluationService projectEvaluationService)
         {
             _fileSystem = fileSystem;
             _dotnetUtilsService = dotnetUtilsService;
             _packagesFileService = packagesFileService;
             _projectAssetsFileService = projectAssetsFileService;
+            _projectEvaluationService = projectEvaluationService;
         }
 
-        /// <summary>
-        /// Properties as evaluated by MSBuild, which also sees values from imports such as
-        /// Directory.Build.props. Empty when the evaluation fails (e.g. non-SDK projects without
-        /// the required targets); callers then fall back to reading the project file XML.
-        /// </summary>
-        private Dictionary<string, string> GetEvaluatedProperties(string projectFilePath)
+        private ProjectEvaluation GetProject(string projectFilePath)
         {
-            if (!_evaluatedProperties.TryGetValue(projectFilePath, out var properties))
+            if (!_projects.TryGetValue(projectFilePath, out var project))
             {
-                var result = _dotnetUtilsService?.GetProjectProperties(projectFilePath, EvaluatedPropertyNames, EvaluationFramework, EvaluationConfiguration);
-                if (result is { Success: true, Result: not null })
-                {
-                    properties = result.Result;
-                }
-                else
-                {
-                    properties = new Dictionary<string, string>();
-                    WriteEvaluationFallbackNotice(projectFilePath, result?.ErrorMessage);
-                }
-                _evaluatedProperties[projectFilePath] = properties;
+                Func<DotnetUtilsResult<Dictionary<string, string>>> evaluate = _projectEvaluationService is null
+                    ? null
+                    : () => _projectEvaluationService.GetProjectProperties(projectFilePath, EvaluatedPropertyNames, EvaluationFramework, EvaluationConfiguration);
+                project = new ProjectEvaluation(projectFilePath, _fileSystem, evaluate, error => ReportEvaluationError(projectFilePath, error));
+                _projects[projectFilePath] = project;
             }
-            return properties;
+            return project;
         }
 
         /// <summary>
         /// Without this notice users cannot tell why values from e.g. Directory.Build.props are ignored.
         /// Names the project, because referenced projects are evaluated while another one is analyzed.
+        /// The same reason (e.g. no loadable MSBuild) is reported only once.
         /// </summary>
-        private static void WriteEvaluationFallbackNotice(string projectFilePath, string errorMessage)
+        private void ReportEvaluationError(string projectFilePath, string errorMessage)
         {
             var errorLines = (errorMessage ?? string.Empty)
                 .Split('\n')
@@ -102,18 +102,15 @@ namespace CycloneDX.Services
                 .Where(line => line.Length > 0)
                 .ToList();
             var reason = errorLines.FirstOrDefault(line => line.Contains("error", StringComparison.OrdinalIgnoreCase)) ?? errorLines.FirstOrDefault();
+            if (!_reportedEvaluationErrors.Add(reason ?? string.Empty))
+            {
+                return;
+            }
 
             Console.ForegroundColor = ConsoleColor.Yellow;
             Console.WriteLine($"  Could not evaluate properties of {Path.GetFileName(projectFilePath)} with MSBuild, reading the project file instead"
                 + (reason is null ? "" : $": {reason}"));
             Console.ResetColor();
-        }
-
-        private string GetEvaluatedProperty(string projectFilePath, string propertyName)
-        {
-            return GetEvaluatedProperties(projectFilePath).TryGetValue(propertyName, out var value) && !string.IsNullOrWhiteSpace(value)
-                ? value
-                : null;
         }
 
         public bool IsTestProject(string projectFilePath)
@@ -123,27 +120,9 @@ namespace CycloneDX.Services
                 return false;
             }
 
-            if (string.Equals(GetEvaluatedProperty(projectFilePath, "IsTestProject"), "true", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            XmlDocument xmldoc = new XmlDocument();
-            using var fileStream = _fileSystem.FileStream.New(projectFilePath, FileMode.Open, FileAccess.Read);
-            xmldoc.Load(fileStream);
-            string namespaceUri = xmldoc.DocumentElement.NamespaceURI;
-
-            XmlNamespaceManager namespaces = new XmlNamespaceManager(xmldoc.NameTable);
-            if (!string.IsNullOrEmpty(namespaceUri))
-            {
-                namespaces.AddNamespace("ns", namespaceUri);
-            }
-
-            string xpathPrefix = string.IsNullOrEmpty(namespaceUri) ? "" : "ns:";
-            XmlElement testSdkReference = xmldoc.SelectSingleNode($"/{xpathPrefix}Project/{xpathPrefix}ItemGroup/{xpathPrefix}PackageReference[@Include='Microsoft.NET.Test.Sdk']", namespaces) as XmlElement;
-            XmlElement testProjectPropertyGroup = xmldoc.SelectSingleNode($"/{xpathPrefix}Project/{xpathPrefix}PropertyGroup[{xpathPrefix}IsTestProject='true']", namespaces) as XmlElement;
-
-            return testSdkReference != null || testProjectPropertyGroup != null;
+            var project = GetProject(projectFilePath);
+            return string.Equals(project.GetProperty("IsTestProject"), "true", StringComparison.OrdinalIgnoreCase)
+                || project.GetDeclaredItems("PackageReference").Contains("Microsoft.NET.Test.Sdk", StringComparer.OrdinalIgnoreCase);
         }
 
         public (string name, string version) GetAssemblyNameAndVersion(string projectFilePath)
@@ -153,29 +132,29 @@ namespace CycloneDX.Services
                 return (projectFilePath, "undefined");
             }
 
+            var project = GetProject(projectFilePath);
             // NuGet names project references by PackageId in project.assets.json, so use the same name
-            string evaluatedName = GetEvaluatedProperty(projectFilePath, "PackageId") ?? GetEvaluatedProperty(projectFilePath, "AssemblyName");
-            string evaluatedVersion = GetEvaluatedProperty(projectFilePath, "Version");
-            if (evaluatedVersion == MSBuildDefaultVersion)
+            var name = project.GetEvaluatedProperty("PackageId")
+                ?? project.GetEvaluatedProperty("AssemblyName")
+                ?? GetDeclaredAssemblyName(project, projectFilePath);
+
+            var version = project.GetEvaluatedProperty("Version");
+            if (version is null || version == MSBuildDefaultVersion)
             {
-                evaluatedVersion = null;
+                version = project.GetDeclaredProperty("Version")
+                    ?? project.GetDeclaredProperty("AssemblyVersion")
+                    ?? project.GetDeclaredProperty("ProjectVersion")
+                    ?? project.GetDeclaredProperty("PackageVersion")
+                    ?? GetAssemblyInfoVersion(projectFilePath);
             }
-            if (evaluatedName != null && evaluatedVersion != null)
-            {
-                return (evaluatedName, evaluatedVersion);
-            }
 
-            XmlDocument xmldoc = new XmlDocument();
-            using var fileStream = _fileSystem.FileStream.New(projectFilePath, FileMode.Open, FileAccess.Read);
-            xmldoc.Load(fileStream);
+            return (name, version);
+        }
 
-            XmlNamespaceManager namespaces = new XmlNamespaceManager(xmldoc.NameTable);
-            namespaces.AddNamespace("msbuild", "http://schemas.microsoft.com/developer/msbuild/2003");
-
-            string name = (xmldoc.SelectSingleNode("/Project/PropertyGroup/AssemblyName") as XmlElement)?.InnerText;
-            name ??= (xmldoc.SelectSingleNode("/Project/PropertyGroup/msbuild:AssemblyName", namespaces) as XmlElement)?.InnerText;
-            name ??= (xmldoc.SelectSingleNode("/msbuild:Project/msbuild:PropertyGroup/msbuild:AssemblyName", namespaces) as XmlElement)?.InnerText;
-                
+        private string GetDeclaredAssemblyName(ProjectEvaluation project, string projectFilePath)
+        {
+            var projectName = _fileSystem.Path.GetFileNameWithoutExtension(projectFilePath);
+            var name = project.GetDeclaredProperty("AssemblyName");
 
             if (name?.Contains("$(RootNamespace)") == true)
             {
@@ -187,76 +166,55 @@ namespace CycloneDX.Services
                 // <RootNamespace>$(AssemblyName)</RootNamespace>
                 // (the documented workaround for this same issue) so the two can't resolve each
                 // other into an infinite loop.
-                string rootNamespace = (xmldoc.SelectSingleNode("/Project/PropertyGroup/RootNamespace") as XmlElement)?.InnerText;
-                rootNamespace ??= (xmldoc.SelectSingleNode("/Project/PropertyGroup/msbuild:RootNamespace", namespaces) as XmlElement)?.InnerText;
-                rootNamespace ??= (xmldoc.SelectSingleNode("/msbuild:Project/msbuild:PropertyGroup/msbuild:RootNamespace", namespaces) as XmlElement)?.InnerText;
-
-                var projectName = _fileSystem.Path.GetFileNameWithoutExtension(projectFilePath);
-                if (!string.IsNullOrEmpty(rootNamespace) && !rootNamespace.Contains("$(AssemblyName)"))
-                {
-                    name = name.Replace("$(RootNamespace)", rootNamespace);
-                }
-                else
-                {
-                    name = name.Replace("$(RootNamespace)", projectName);
-                }
+                var rootNamespace = project.GetDeclaredProperty("RootNamespace");
+                name = !string.IsNullOrEmpty(rootNamespace) && !rootNamespace.Contains("$(AssemblyName)")
+                    ? name.Replace("$(RootNamespace)", rootNamespace)
+                    : name.Replace("$(RootNamespace)", projectName);
             }
 
             // RootNamespace substitution can introduce this known token too.
             if (name?.Contains("$(MSBuildProjectName)") == true)
             {
-                var projectName = _fileSystem.Path.GetFileNameWithoutExtension(projectFilePath);
                 name = name.Replace("$(MSBuildProjectName)", projectName);
             }
 
-            name ??= _fileSystem.Path.GetFileNameWithoutExtension(projectFilePath);
+            return name ?? projectName;
+        }
 
-
-            // Extract Version — try each property in priority order before falling back to AssemblyInfo
-            string version =
-                (xmldoc.SelectSingleNode("/Project/PropertyGroup/Version") as XmlElement)?.InnerText ??
-                (xmldoc.SelectSingleNode("/Project/PropertyGroup/AssemblyVersion") as XmlElement)?.InnerText ??
-                (xmldoc.SelectSingleNode("/Project/PropertyGroup/ProjectVersion") as XmlElement)?.InnerText ??
-                (xmldoc.SelectSingleNode("/Project/PropertyGroup/PackageVersion") as XmlElement)?.InnerText;
-
-            if (version == null)
+        private string GetAssemblyInfoVersion(string projectFilePath)
+        {
+            string assemblyInfoPath;
+            string pattern;
+            string projectFileExtension = Path.GetExtension(projectFilePath);
+            if (projectFileExtension.Equals(".vbproj", StringComparison.Ordinal))
             {
-                string assemblyInfoPath;
-                string pattern;
-                string projectFileExtension = Path.GetExtension(projectFilePath);
-                if (projectFileExtension.Equals(".vbproj", StringComparison.Ordinal))
-                {
-                    assemblyInfoPath = Path.Combine(Path.GetDirectoryName(projectFilePath), "My Project", "AssemblyInfo.vb");
-                    pattern = @"^\<Assembly: AssemblyVersion\(""(?<Version>.*?)""\)\>$";
-                }
-                else if (projectFileExtension.Equals(".xsproj", StringComparison.Ordinal))
-                {
-                    assemblyInfoPath = Path.Combine(Path.GetDirectoryName(projectFilePath), "Properties", "AssemblyInfo.prg");
-                    pattern = @"^\[assembly: AssemblyVersion\(""(?<Version>.*?)""\)\]$";
-                }
-                else
-                {
-                    assemblyInfoPath = Path.Combine(Path.GetDirectoryName(projectFilePath), "Properties", "AssemblyInfo.cs");
-                    pattern = @"^\[assembly: AssemblyVersion\(""(?<Version>.*?)""\)\]$";
-                }
-
-                if (_fileSystem.File.Exists(assemblyInfoPath))
-                {
-                    string[] lines = _fileSystem.File.ReadAllLines(assemblyInfoPath);
-                    foreach (var line in lines)
-                    {
-                        Match match = Regex.Match(line, pattern);
-
-                        if (match.Success)
-                        {
-                            version = match.Groups["Version"].Value;
-                            break;
-                        }
-                    }
-                }
+                assemblyInfoPath = Path.Combine(Path.GetDirectoryName(projectFilePath), "My Project", "AssemblyInfo.vb");
+                pattern = @"^\<Assembly: AssemblyVersion\(""(?<Version>.*?)""\)\>$";
+            }
+            else if (projectFileExtension.Equals(".xsproj", StringComparison.Ordinal))
+            {
+                assemblyInfoPath = Path.Combine(Path.GetDirectoryName(projectFilePath), "Properties", "AssemblyInfo.prg");
+                pattern = @"^\[assembly: AssemblyVersion\(""(?<Version>.*?)""\)\]$";
+            }
+            else
+            {
+                assemblyInfoPath = Path.Combine(Path.GetDirectoryName(projectFilePath), "Properties", "AssemblyInfo.cs");
+                pattern = @"^\[assembly: AssemblyVersion\(""(?<Version>.*?)""\)\]$";
             }
 
-            return (evaluatedName ?? name, evaluatedVersion ?? version);
+            if (!_fileSystem.File.Exists(assemblyInfoPath))
+            {
+                return null;
+            }
+            foreach (var line in _fileSystem.File.ReadAllLines(assemblyInfoPath))
+            {
+                Match match = Regex.Match(line, pattern);
+                if (match.Success)
+                {
+                    return match.Groups["Version"].Value;
+                }
+            }
+            return null;
         }
 
         public bool DisablePackageRestore { get; set; }
@@ -366,11 +324,23 @@ namespace CycloneDX.Services
                 return assetsPath;
             }
 
-            var result = _dotnetUtilsService.GetAssetsPath(projectFilePath);
-            if (result.Success && _fileSystem.File.Exists(result.Result))
+            var project = GetProject(projectFilePath);
+            var evaluatedAssetsPath = project.GetEvaluatedProperty("ProjectAssetsFile");
+            if (evaluatedAssetsPath != null && _fileSystem.File.Exists(evaluatedAssetsPath))
             {
-                Console.WriteLine($"  Found Assetsfile under {result.Result}");
-                return result.Result;
+                Console.WriteLine($"  Found Assetsfile under {evaluatedAssetsPath}");
+                return evaluatedAssetsPath;
+            }
+
+            // Only without an evaluation ask the dotnet CLI, which takes a process per project
+            if (!project.IsEvaluated)
+            {
+                var result = _dotnetUtilsService.GetAssetsPath(projectFilePath);
+                if (result.Success && _fileSystem.File.Exists(result.Result))
+                {
+                    Console.WriteLine($"  Found Assetsfile under {result.Result}");
+                    return result.Result;
+                }
             }
 
             // Fall back to expected path even if file doesn't exist
@@ -445,12 +415,12 @@ namespace CycloneDX.Services
         /// </summary>
         /// <param name="projectFilePath"></param>
         /// <returns></returns>
-        public async Task<HashSet<string>> GetProjectReferencesAsync(string projectFilePath)
+        public Task<HashSet<string>> GetProjectReferencesAsync(string projectFilePath)
         {
             if (!_fileSystem.File.Exists(projectFilePath))
             {
                 Console.Error.WriteLine($"Project file \"{projectFilePath}\" does not exist");
-                return new HashSet<string>();
+                return Task.FromResult(new HashSet<string>());
             }
 
             Console.WriteLine();
@@ -460,28 +430,14 @@ namespace CycloneDX.Services
             var projectReferences = new HashSet<string>();
             var projectDirectory = _fileSystem.FileInfo.New(projectFilePath).Directory.FullName;
 
-            using (StreamReader fileReader = _fileSystem.File.OpenText(projectFilePath))
+            foreach (var includeAttribute in GetProject(projectFilePath).GetDeclaredItems("ProjectReference"))
             {
-                using (XmlReader reader = XmlReader.Create(fileReader, _xmlReaderSettings))
-                {
-                    while (await reader.ReadAsync().ConfigureAwait(false))
-                    {
-                        if (reader.IsStartElement() && reader.Name == "ProjectReference")
-                        {
-                            string includeAttribute = reader["Include"];
-
-                            if (includeAttribute != null)
-                            {
-                                var relativeProjectReference =
-                                    includeAttribute.Replace('\\', _fileSystem.Path.DirectorySeparatorChar);
-                                var fullProjectReference =
-                                    _fileSystem.Path.Combine(projectDirectory, relativeProjectReference);
-                                var absoluteProjectReference = _fileSystem.Path.GetFullPath(fullProjectReference);
-                                projectReferences.Add(absoluteProjectReference);
-                            }
-                        }
-                    }
-                }
+                var relativeProjectReference =
+                    includeAttribute.Replace('\\', _fileSystem.Path.DirectorySeparatorChar);
+                var fullProjectReference =
+                    _fileSystem.Path.Combine(projectDirectory, relativeProjectReference);
+                var absoluteProjectReference = _fileSystem.Path.GetFullPath(fullProjectReference);
+                projectReferences.Add(absoluteProjectReference);
             }
 
             if (projectReferences.Count == 0)
@@ -489,7 +445,7 @@ namespace CycloneDX.Services
                 Console.WriteLine("  No project references found");
             }
 
-            return projectReferences;
+            return Task.FromResult(projectReferences);
         }
 
         /// <summary>

@@ -13,7 +13,7 @@ namespace CycloneDX.Tests.FunctionalTests
     /// <summary>
     /// Properties set outside the project file (e.g. in Directory.Build.props) are only visible
     /// through MSBuild evaluation. The project files below intentionally lack them or contain
-    /// unresolved property references; the evaluated values come from IDotnetUtilsService.
+    /// unresolved property references; the evaluated values come from IProjectEvaluationService.
     /// </summary>
     public class EvaluatedProjectProperties
     {
@@ -41,7 +41,7 @@ namespace CycloneDX.Tests.FunctionalTests
             });
         }
 
-        private static Mock<IDotnetUtilsService> GetDotnetUtilsService()
+        private static Mock<IProjectEvaluationService> GetProjectEvaluationService()
         {
             // keyed by project name, the runner passes normalized full paths
             var evaluatedProperties = new Dictionary<string, Dictionary<string, string>>
@@ -50,17 +50,11 @@ namespace CycloneDX.Tests.FunctionalTests
                 ["Foo.Bar.Lib"] = new() { ["Version"] = "7.0.0", ["PackageId"] = "Contoso.Foo.Bar.Lib", ["AssemblyName"] = "Contoso.Foo.Bar.Lib", ["IsTestProject"] = "" }
             };
 
-            var dotnetUtilsService = new Mock<IDotnetUtilsService>();
-            dotnetUtilsService
-                .Setup(m => m.GetPackageCachePaths())
-                .Returns(new DotnetUtilsResult<List<string>> { Result = new List<string> { MockUnixSupport.Path("c:/nuget/packages") } });
-            dotnetUtilsService
-                .Setup(m => m.GetAssetsPath(It.IsAny<string>()))
-                .Returns(new DotnetUtilsResult<string> { ErrorMessage = "no assets file" });
-            dotnetUtilsService
+            var projectEvaluationService = new Mock<IProjectEvaluationService>();
+            projectEvaluationService
                 .Setup(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()))
                 .Returns((string path, IEnumerable<string> _, string _, string _) => new DotnetUtilsResult<Dictionary<string, string>> { Result = evaluatedProperties[Path.GetFileNameWithoutExtension(path)] });
-            return dotnetUtilsService;
+            return projectEvaluationService;
         }
 
         [Fact]
@@ -68,7 +62,7 @@ namespace CycloneDX.Tests.FunctionalTests
         {
             var options = new RunOptions { SolutionOrProjectFile = AppPath };
 
-            var bom = await FunctionalTestHelper.Test(options, GetDotnetUtilsService().Object, GetMockFS());
+            var bom = await FunctionalTestHelper.Test(options, GetProjectEvaluationService().Object, GetMockFS());
 
             Assert.Equal("4.5.6", bom.Metadata.Component.Version);
         }
@@ -84,7 +78,7 @@ namespace CycloneDX.Tests.FunctionalTests
                 SolutionOrProjectFile = AppPath
             };
 
-            var bom = await FunctionalTestHelper.Test(options, GetDotnetUtilsService().Object, GetMockFS());
+            var bom = await FunctionalTestHelper.Test(options, GetProjectEvaluationService().Object, GetMockFS());
 
             var lib = Assert.Single(bom.Components, c => c.Type == Component.Classification.Library && c.Name != "log4net");
             Assert.Equal("Contoso.Foo.Bar.Lib", lib.Name);
@@ -99,12 +93,12 @@ namespace CycloneDX.Tests.FunctionalTests
         public async Task EvaluationUsesConfigurationAndFrameworkOptions()
         {
             var options = new RunOptions { SolutionOrProjectFile = AppPath, configuration = "Release", framework = "net8.0" };
-            var dotnetUtilsService = GetDotnetUtilsService();
+            var projectEvaluationService = GetProjectEvaluationService();
 
-            await FunctionalTestHelper.Test(options, dotnetUtilsService.Object, GetMockFS());
+            await FunctionalTestHelper.Test(options, projectEvaluationService.Object, GetMockFS());
 
-            dotnetUtilsService.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), "net8.0", "Release"), Times.AtLeastOnce);
-            dotnetUtilsService.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.Is<string>(f => f != "net8.0"), It.IsAny<string>()), Times.Never);
+            projectEvaluationService.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), "net8.0", "Release"), Times.AtLeastOnce);
+            projectEvaluationService.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.Is<string>(f => f != "net8.0"), It.IsAny<string>()), Times.Never);
         }
     }
 }

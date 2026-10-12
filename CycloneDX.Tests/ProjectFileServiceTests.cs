@@ -887,25 +887,26 @@ namespace CycloneDX.Tests
         // MSBuild evaluation — properties from Directory.Build.props and other imports
         // -----------------------------------------------------------------------
 
-        private static (ProjectFileService service, Mock<IDotnetUtilsService> dotnetUtils) CreateProjectFileServiceWithEvaluatedProperties(
+        private static (ProjectFileService service, Mock<IProjectEvaluationService> evaluation) CreateProjectFileServiceWithEvaluatedProperties(
             string csproj, Dictionary<string, string> evaluatedProperties)
         {
             var mockFileSystem = new MockFileSystem(new Dictionary<string, MockFileData>
             {
                 { XFS.Path(@"c:\P\P.csproj"), new MockFileData(csproj) }
             });
-            var dotnetUtils = new Mock<IDotnetUtilsService>();
-            dotnetUtils
+            var evaluation = new Mock<IProjectEvaluationService>();
+            evaluation
                 .Setup(m => m.GetProjectProperties(XFS.Path(@"c:\P\P.csproj"), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()))
                 .Returns(evaluatedProperties is null
-                    ? new DotnetUtilsResult<Dictionary<string, string>> { ErrorMessage = "MSB1009: Project file does not exist." }
+                    ? new DotnetUtilsResult<Dictionary<string, string>> { ErrorMessage = "MSB4025: The project file could not be loaded." }
                     : new DotnetUtilsResult<Dictionary<string, string>> { Result = evaluatedProperties });
             var service = new ProjectFileService(
                 mockFileSystem,
-                dotnetUtils.Object,
+                new Mock<IDotnetUtilsService>().Object,
                 new Mock<IPackagesFileService>().Object,
-                new Mock<IProjectAssetsFileService>().Object);
-            return (service, dotnetUtils);
+                new Mock<IProjectAssetsFileService>().Object,
+                evaluation.Object);
+            return (service, evaluation);
         }
 
         [Fact]
@@ -989,7 +990,7 @@ namespace CycloneDX.Tests
         [Fact]
         public void EvaluatedProperties_AreRequestedOncePerProject()
         {
-            var (svc, dotnetUtils) = CreateProjectFileServiceWithEvaluatedProperties(
+            var (svc, evaluation) = CreateProjectFileServiceWithEvaluatedProperties(
                 "<Project><PropertyGroup /></Project>",
                 new Dictionary<string, string> { ["Version"] = "4.5.6", ["IsTestProject"] = "" });
 
@@ -997,13 +998,13 @@ namespace CycloneDX.Tests
             svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
             svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
 
-            dotnetUtils.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()), Times.Once);
+            evaluation.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()), Times.Once);
         }
 
         [Fact]
         public void EvaluatedProperties_UseEvaluationFrameworkAndConfiguration()
         {
-            var (svc, dotnetUtils) = CreateProjectFileServiceWithEvaluatedProperties(
+            var (svc, evaluation) = CreateProjectFileServiceWithEvaluatedProperties(
                 "<Project><PropertyGroup /></Project>",
                 new Dictionary<string, string> { ["Version"] = "2.0.0" });
             svc.EvaluationFramework = "net8.0";
@@ -1011,7 +1012,89 @@ namespace CycloneDX.Tests
 
             svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
 
-            dotnetUtils.Verify(m => m.GetProjectProperties(XFS.Path(@"c:\P\P.csproj"), It.IsAny<IEnumerable<string>>(), "net8.0", "Release"), Times.Once);
+            evaluation.Verify(m => m.GetProjectProperties(XFS.Path(@"c:\P\P.csproj"), It.IsAny<IEnumerable<string>>(), "net8.0", "Release"), Times.Once);
+        }
+
+        // -----------------------------------------------------------------------
+        // Project file XML — one parse per project, shared by all properties and items
+        // -----------------------------------------------------------------------
+
+        [Fact]
+        public void GetAssemblyNameAndVersion_ClassicProjectWithMsbuildNamespace_ReadsDeclaredVersion()
+        {
+            const string csproj = @"<Project ToolsVersion=""15.0"" xmlns=""http://schemas.microsoft.com/developer/msbuild/2003"">
+  <PropertyGroup><AssemblyName>Classic</AssemblyName><Version>1.2.3</Version></PropertyGroup>
+</Project>";
+            var svc = CreateProjectFileService(new MockFileSystem(new Dictionary<string, MockFileData>
+            {
+                { XFS.Path(@"c:\P\P.csproj"), new MockFileData(csproj) }
+            }));
+
+            var (name, version) = svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
+
+            Assert.Equal("Classic", name);
+            Assert.Equal("1.2.3", version);
+        }
+
+        [Theory]
+        [InlineData("<ItemGroup><PackageReference Include=\"microsoft.net.test.sdk\" /></ItemGroup>")]
+        [InlineData("<Choose><When Condition=\"true\"><ItemGroup><PackageReference Include=\"Microsoft.NET.Test.Sdk\" /></ItemGroup></When></Choose>")]
+        public void IsTestProject_DetectsTestSdkReferenceInAnyItemGroup(string items)
+        {
+            var svc = CreateProjectFileService(new MockFileSystem(new Dictionary<string, MockFileData>
+            {
+                { XFS.Path(@"c:\P\P.csproj"), new MockFileData($"<Project>{items}</Project>") }
+            }));
+
+            Assert.True(svc.IsTestProject(XFS.Path(@"c:\P\P.csproj")));
+        }
+
+        [Fact]
+        public void IsTestProject_EvaluatedValue_WinsOverConditionalDeclaration()
+        {
+            var (svc, _) = CreateProjectFileServiceWithEvaluatedProperties(
+                "<Project><PropertyGroup Condition=\"'$(Configuration)' == 'Never'\"><IsTestProject>true</IsTestProject></PropertyGroup></Project>",
+                new Dictionary<string, string> { ["IsTestProject"] = "false" });
+
+            Assert.False(svc.IsTestProject(XFS.Path(@"c:\P\P.csproj")));
+        }
+
+        [Fact]
+        public void GetProjectAssetsFilePath_UsesEvaluatedProjectAssetsFile_InsteadOfDotnetCli()
+        {
+            var projectPath = XFS.Path(@"c:\P\P.csproj");
+            var assetsPath = XFS.Path(@"c:\artifacts\obj\P\project.assets.json");
+            var mockFileSystem = new MockFileSystem(new Dictionary<string, MockFileData>
+            {
+                { projectPath, new MockFileData("<Project />") },
+                { assetsPath, new MockFileData("{}") }
+            });
+            var dotnetUtils = new Mock<IDotnetUtilsService>();
+            var evaluation = new Mock<IProjectEvaluationService>();
+            evaluation
+                .Setup(m => m.GetProjectProperties(projectPath, It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()))
+                .Returns(new DotnetUtilsResult<Dictionary<string, string>> { Result = new Dictionary<string, string> { ["ProjectAssetsFile"] = assetsPath } });
+            var svc = new ProjectFileService(mockFileSystem, dotnetUtils.Object, new Mock<IPackagesFileService>().Object, new Mock<IProjectAssetsFileService>().Object, evaluation.Object);
+
+            Assert.Equal(assetsPath, svc.GetProjectAssetsFilePath(projectPath, ""));
+            dotnetUtils.Verify(m => m.GetAssetsPath(It.IsAny<string>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task GetProjectReferences_ReadsTheProjectFileWithoutEvaluatingIt()
+        {
+            var projectPath = XFS.Path(@"c:\P\P.csproj");
+            var mockFileSystem = new MockFileSystem(new Dictionary<string, MockFileData>
+            {
+                { projectPath, new MockFileData(@"<Project><ItemGroup><ProjectReference Include=""..\Lib\Lib.csproj"" /></ItemGroup></Project>") }
+            });
+            var evaluation = new Mock<IProjectEvaluationService>();
+            var svc = new ProjectFileService(mockFileSystem, new Mock<IDotnetUtilsService>().Object, new Mock<IPackagesFileService>().Object, new Mock<IProjectAssetsFileService>().Object, evaluation.Object);
+
+            var references = await svc.GetProjectReferencesAsync(projectPath);
+
+            Assert.Equal(XFS.Path(@"c:\Lib\Lib.csproj"), Assert.Single(references));
+            evaluation.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()), Times.Never);
         }
     }
 }

@@ -19,7 +19,6 @@ using System;
 using System.Linq;
 using System.Collections.Generic;
 using System.IO.Abstractions;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using CycloneDX.Interfaces;
 using CycloneDX.Models;
@@ -172,80 +171,6 @@ namespace CycloneDX.Services
                     ErrorMessage = commandResult.StdOut
                 };
             }
-        }
-
-        /// <summary>
-        /// Evaluates the given properties with MSBuild, so that values from imports such as
-        /// Directory.Build.props, property references and conditions are resolved.
-        /// Framework and configuration are passed like in <see cref="Restore(string, string, string, string)"/>,
-        /// so the evaluation sees the same global properties as the restore.
-        /// </summary>
-        public DotnetUtilsResult<Dictionary<string, string>> GetProjectProperties(string projectFilePath, IEnumerable<string> propertyNames, string framework, string configuration)
-        {
-            var names = propertyNames?.Where(name => !string.IsNullOrWhiteSpace(name)).ToList() ?? new List<string>();
-            if (string.IsNullOrWhiteSpace(projectFilePath) || names.Count == 0)
-            {
-                return new DotnetUtilsResult<Dictionary<string, string>>
-                {
-                    ErrorMessage = "Project file path or property names are missing"
-                };
-            }
-
-            var arguments = $"msbuild \"{projectFilePath}\" -nologo -v:quiet {string.Join(" ", names.Select(name => $"-getProperty:{name}"))}";
-            if (!string.IsNullOrEmpty(framework))
-            {
-                arguments = $"{arguments} -p:TargetFramework={framework}";
-            }
-            if (!string.IsNullOrEmpty(configuration))
-            {
-                arguments = $"{arguments} -p:Configuration={configuration}";
-            }
-            var commandResult = _dotnetCommandService.Run(arguments);
-
-            if (!commandResult.Success)
-            {
-                // MSBuild writes some errors (e.g. unknown switches of older SDKs) to stdout
-                var errorOutput = string.IsNullOrWhiteSpace(commandResult.StdErr) ? commandResult.StdOut : commandResult.StdErr;
-                return new DotnetUtilsResult<Dictionary<string, string>>
-                {
-                    ErrorMessage = string.IsNullOrWhiteSpace(errorOutput) ? $"Unable to evaluate properties of {projectFilePath}" : errorOutput
-                };
-            }
-
-            var output = commandResult.StdOut?.Trim() ?? string.Empty;
-            var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-            // MSBuild prints the plain value for a single property and a JSON object for several
-            if (names.Count == 1)
-            {
-                if (output.Contains('\n'))
-                {
-                    return new DotnetUtilsResult<Dictionary<string, string>>
-                    {
-                        ErrorMessage = $"Unexpected output when evaluating {names[0]}: {commandResult.StdOut}"
-                    };
-                }
-                properties[names[0]] = output;
-                return new DotnetUtilsResult<Dictionary<string, string>> { Result = properties };
-            }
-
-            try
-            {
-                using var document = JsonDocument.Parse(output);
-                foreach (var property in document.RootElement.GetProperty("Properties").EnumerateObject())
-                {
-                    properties[property.Name] = property.Value.GetString();
-                }
-            }
-            catch (Exception ex) when (ex is JsonException || ex is KeyNotFoundException || ex is InvalidOperationException)
-            {
-                return new DotnetUtilsResult<Dictionary<string, string>>
-                {
-                    ErrorMessage = $"Unexpected output when evaluating project properties: {commandResult.StdOut}"
-                };
-            }
-
-            return new DotnetUtilsResult<Dictionary<string, string>> { Result = properties };
         }
 
         public DotnetUtilsResult<string> GetAssetsPath(string projectFilePath)

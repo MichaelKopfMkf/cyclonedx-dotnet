@@ -6,6 +6,8 @@
     <TargetFrameworks>net10.0;net9.0;net8.0</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <InvariantGlobalization>false</InvariantGlobalization>
+    <!-- CycloneDX needs NuGet.Frameworks at runtime to read assets files; MSBuild of the SDK is still loaded via MSBuildLocator -->
+    <DisableMSBuildAssemblyCopyCheck>true</DisableMSBuildAssemblyCopyCheck>
   </PropertyGroup>
 
   <ItemGroup>

@@ -75,7 +75,10 @@ listed project are included.
 2. `project.assets.json` is located:
    - `<--base-intermediate-output-path>/obj/<projectName>/project.assets.json`, or
    - `<projectDir>/obj/project.assets.json`, or
-   - queried via `dotnet msbuild -getProperty:ProjectAssetsFile`.
+   - the evaluated `ProjectAssetsFile` property (in-process MSBuild evaluation, see
+     [Project References](#project-references)), or
+   - queried via `dotnet msbuild -getProperty:ProjectAssetsFile` when the project could not
+     be evaluated in-process.
 3. All `LockFileTarget` entries (one per TFM × RID combination) are iterated and
    union-merged into a single package set. Equality is `(Name, Version)`.
 4. `IsDirectReference` is determined per-TFM from `ProjectFileDependencyGroups`.

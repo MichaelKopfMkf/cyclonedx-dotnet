@@ -35,21 +35,25 @@ namespace CycloneDX.Tests
         private const string Notice = "Could not evaluate properties of Notice.csproj with MSBuild, reading the project file instead";
         private static readonly string ProjectPath = XFS.Path(@"c:\Notice\Notice.csproj");
 
+        private static readonly string OtherProjectPath = XFS.Path(@"c:\Other\Other.csproj");
+
         private static ProjectFileService CreateProjectFileService(DotnetUtilsResult<Dictionary<string, string>> evaluationResult)
         {
             var mockFileSystem = new MockFileSystem(new Dictionary<string, MockFileData>
             {
-                { ProjectPath, new MockFileData("<Project><PropertyGroup><Version>1.2.3</Version></PropertyGroup></Project>") }
+                { ProjectPath, new MockFileData("<Project><PropertyGroup><Version>1.2.3</Version></PropertyGroup></Project>") },
+                { OtherProjectPath, new MockFileData("<Project><PropertyGroup><Version>1.2.3</Version></PropertyGroup></Project>") }
             });
-            var dotnetUtils = new Mock<IDotnetUtilsService>();
-            dotnetUtils
-                .Setup(m => m.GetProjectProperties(ProjectPath, It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()))
+            var evaluation = new Mock<IProjectEvaluationService>();
+            evaluation
+                .Setup(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()))
                 .Returns(evaluationResult);
             return new ProjectFileService(
                 mockFileSystem,
-                dotnetUtils.Object,
+                new Mock<IDotnetUtilsService>().Object,
                 new Mock<IPackagesFileService>().Object,
-                new Mock<IProjectAssetsFileService>().Object);
+                new Mock<IProjectAssetsFileService>().Object,
+                evaluation.Object);
         }
 
         private static string CaptureOutput(Action action)
@@ -99,6 +103,23 @@ namespace CycloneDX.Tests
             var output = CaptureOutput(() => svc.GetAssemblyNameAndVersion(ProjectPath));
 
             Assert.DoesNotContain("Could not evaluate", output);
+        }
+
+        [Fact]
+        public void SameEvaluationErrorForSeveralProjects_IsReportedOnce()
+        {
+            var svc = CreateProjectFileService(new DotnetUtilsResult<Dictionary<string, string>>
+            {
+                ErrorMessage = "The .NET SDK 10.0.101 resolved by the dotnet CLI cannot be loaded by the .NET 8.0 runtime"
+            });
+
+            var output = CaptureOutput(() =>
+            {
+                svc.IsTestProject(ProjectPath);
+                svc.IsTestProject(OtherProjectPath);
+            });
+
+            Assert.Single(output.Split('\n'), line => line.Contains("Could not evaluate"));
         }
     }
 }

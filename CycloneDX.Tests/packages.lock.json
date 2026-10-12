@@ -276,6 +276,7 @@
         "type": "Project",
         "dependencies": {
           "CycloneDX.Core": "[12.1.1, )",
+          "Microsoft.Build.Locator": "[1.11.2, )",
           "NuGet.ProjectModel": "[7.6.0, )",
           "NuGet.Protocol": "[7.6.0, )",
           "System.CommandLine": "[2.0.8, )",
@@ -291,6 +292,12 @@
           "JsonSchema.Net": "9.1.1",
           "protobuf-net": "3.2.56"
         }
+      },
+      "Microsoft.Build.Locator": {
+        "type": "CentralTransitive",
+        "requested": "[1.11.2, )",
+        "resolved": "1.11.2",
+        "contentHash": "tY+/S54G29CGsbL3slVu4vqtpciwVnb3fKOmrhgzEQmu/VziFaWmD/E1e/2KH7cDucuycGSkWsSXndBs5Uawow=="
       },
       "NuGet.ProjectModel": {
         "type": "CentralTransitive",
@@ -602,6 +609,7 @@
         "type": "Project",
         "dependencies": {
           "CycloneDX.Core": "[12.1.1, )",
+          "Microsoft.Build.Locator": "[1.11.2, )",
           "NuGet.ProjectModel": "[7.6.0, )",
           "NuGet.Protocol": "[7.6.0, )",
           "System.CommandLine": "[2.0.8, )",
@@ -617,6 +625,12 @@
           "JsonSchema.Net": "9.1.1",
           "protobuf-net": "3.2.56"
         }
+      },
+      "Microsoft.Build.Locator": {
+        "type": "CentralTransitive",
+        "requested": "[1.11.2, )",
+        "resolved": "1.11.2",
+        "contentHash": "tY+/S54G29CGsbL3slVu4vqtpciwVnb3fKOmrhgzEQmu/VziFaWmD/E1e/2KH7cDucuycGSkWsSXndBs5Uawow=="
       },
       "NuGet.ProjectModel": {
         "type": "CentralTransitive",
@@ -928,6 +942,7 @@
         "type": "Project",
         "dependencies": {
           "CycloneDX.Core": "[12.1.1, )",
+          "Microsoft.Build.Locator": "[1.11.2, )",
           "NuGet.ProjectModel": "[7.6.0, )",
           "NuGet.Protocol": "[7.6.0, )",
           "System.CommandLine": "[2.0.8, )",
@@ -943,6 +958,12 @@
           "JsonSchema.Net": "9.1.1",
           "protobuf-net": "3.2.56"
         }
+      },
+      "Microsoft.Build.Locator": {
+        "type": "CentralTransitive",
+        "requested": "[1.11.2, )",
+        "resolved": "1.11.2",
+        "contentHash": "tY+/S54G29CGsbL3slVu4vqtpciwVnb3fKOmrhgzEQmu/VziFaWmD/E1e/2KH7cDucuycGSkWsSXndBs5Uawow=="
       },
       "NuGet.ProjectModel": {
         "type": "CentralTransitive",
