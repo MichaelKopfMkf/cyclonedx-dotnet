@@ -43,10 +43,16 @@ namespace CycloneDX.Services
             Async = true
         };
 
+        // SDK-style projects evaluate Version to 1.0.0 when nothing sets it. That cannot be told
+        // apart from an explicit 1.0.0, so it is treated as unset and the project file fallbacks apply.
+        private const string MSBuildDefaultVersion = "1.0.0";
+        private static readonly string[] EvaluatedPropertyNames = { "Version", "PackageId", "AssemblyName", "IsTestProject" };
+
         private IFileSystem _fileSystem;
         private IDotnetUtilsService _dotnetUtilsService;
         private IPackagesFileService _packagesFileService;
         private IProjectAssetsFileService _projectAssetsFileService;
+        private readonly Dictionary<string, Dictionary<string, string>> _evaluatedProperties = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
 
         public ProjectFileService(
             IFileSystem fileSystem,
@@ -60,11 +66,39 @@ namespace CycloneDX.Services
             _projectAssetsFileService = projectAssetsFileService;
         }
 
+        /// <summary>
+        /// Properties as evaluated by MSBuild, which also sees values from imports such as
+        /// Directory.Build.props. Empty when the evaluation fails (e.g. non-SDK projects without
+        /// the required targets); callers then fall back to reading the project file XML.
+        /// </summary>
+        private Dictionary<string, string> GetEvaluatedProperties(string projectFilePath)
+        {
+            if (!_evaluatedProperties.TryGetValue(projectFilePath, out var properties))
+            {
+                var result = _dotnetUtilsService?.GetProjectProperties(projectFilePath, EvaluatedPropertyNames);
+                properties = result is { Success: true, Result: not null } ? result.Result : new Dictionary<string, string>();
+                _evaluatedProperties[projectFilePath] = properties;
+            }
+            return properties;
+        }
+
+        private string GetEvaluatedProperty(string projectFilePath, string propertyName)
+        {
+            return GetEvaluatedProperties(projectFilePath).TryGetValue(propertyName, out var value) && !string.IsNullOrWhiteSpace(value)
+                ? value
+                : null;
+        }
+
         public bool IsTestProject(string projectFilePath)
         {
             if (!_fileSystem.File.Exists(projectFilePath))
             {
                 return false;
+            }
+
+            if (string.Equals(GetEvaluatedProperty(projectFilePath, "IsTestProject"), "true", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
             }
 
             XmlDocument xmldoc = new XmlDocument();
@@ -92,6 +126,17 @@ namespace CycloneDX.Services
                 return (projectFilePath, "undefined");
             }
 
+            // NuGet names project references by PackageId in project.assets.json, so use the same name
+            string evaluatedName = GetEvaluatedProperty(projectFilePath, "PackageId") ?? GetEvaluatedProperty(projectFilePath, "AssemblyName");
+            string evaluatedVersion = GetEvaluatedProperty(projectFilePath, "Version");
+            if (evaluatedVersion == MSBuildDefaultVersion)
+            {
+                evaluatedVersion = null;
+            }
+            if (evaluatedName != null && evaluatedVersion != null)
+            {
+                return (evaluatedName, evaluatedVersion);
+            }
 
             XmlDocument xmldoc = new XmlDocument();
             using var fileStream = _fileSystem.FileStream.New(projectFilePath, FileMode.Open, FileAccess.Read);
@@ -184,7 +229,7 @@ namespace CycloneDX.Services
                 }
             }
 
-            return (name, version);
+            return (evaluatedName ?? name, evaluatedVersion ?? version);
         }
 
         public bool DisablePackageRestore { get; set; }
