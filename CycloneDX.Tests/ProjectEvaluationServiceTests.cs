@@ -16,12 +16,12 @@
 // Copyright (c) OWASP Foundation. All Rights Reserved.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Abstractions;
 using System.IO.Abstractions.TestingHelpers;
 using System.Linq;
-using System.Text.Json;
 using CycloneDX.Interfaces;
 using CycloneDX.Models;
 using CycloneDX.Services;
@@ -51,105 +51,67 @@ namespace CycloneDX.Tests
         }
 
         // -----------------------------------------------------------------------
-        // Mocked dotnet: command line, parsing and error handling
+        // Mocked dotnet: the .NET SDK whose MSBuild evaluates the projects
         // -----------------------------------------------------------------------
 
-        private static string TargetResult(params object[] items)
-            => JsonSerializer.Serialize(new { TargetResults = new { CycloneDXEvaluate = new { Result = "Success", Items = items } } });
+        private static readonly string Sdks = XFS.Path(@"c:\dotnet\sdk");
 
-        [Fact]
-        public void EvaluateProjects_EvaluatesAllProjectsInOneDotnetProcess()
+        private static Mock<IDotnetCommandService> MockDotnet(DotnetCommandResult version, string listSdks = "")
         {
-            var project1 = XFS.Path(@"c:\P1\P1.csproj");
-            var project2 = XFS.Path(@"c:\P2\P2.csproj");
-            var arguments = new List<string>();
-            var dotnet = new Mock<IDotnetCommandService>();
-            dotnet
-                .Setup(m => m.Run(It.IsAny<string>()))
-                .Callback<string>(arguments.Add)
-                .Returns(new DotnetCommandResult
-                {
-                    ExitCode = 0,
-                    StdOut = TargetResult(
-                        new { Identity = project1, Version = "4.5.6", PackageId = "Contoso.P1", PackageReference = "Microsoft.NET.Test.Sdk;Moq" },
-                        new { Identity = project2, Version = "", PackageId = "P2", PackageReference = "" })
-                });
-
-            var results = new ProjectEvaluationService(new MockFileSystem(), dotnet.Object)
-                .EvaluateProjects(new[] { project1, project2 }, PropertyNames, ItemTypes, "net8.0", "Release");
-
-            var argument = Assert.Single(arguments);
-            Assert.StartsWith("msbuild ", argument, StringComparison.Ordinal);
-            Assert.Contains("-getTargetResult:", argument, StringComparison.Ordinal);
-            Assert.Contains("-p:TargetFramework=net8.0", argument, StringComparison.Ordinal);
-            Assert.Contains("-p:Configuration=Release", argument, StringComparison.Ordinal);
-            Assert.True(results[project1].Success);
-            Assert.Equal("4.5.6", results[project1].Result.Properties["Version"]);
-            Assert.Equal("Contoso.P1", results[project1].Result.Properties["PackageId"]);
-            Assert.Equal(new[] { "Microsoft.NET.Test.Sdk", "Moq" }, results[project1].Result.Items["PackageReference"]);
-            Assert.Equal("", results[project2].Result.Properties["Version"]);
-            Assert.Empty(results[project2].Result.Items["PackageReference"]);
+            var dotnet = new Mock<IDotnetCommandService>(MockBehavior.Strict);
+            dotnet.Setup(m => m.Run("--version")).Returns(version);
+            dotnet.Setup(m => m.Run("--list-sdks")).Returns(new DotnetCommandResult { ExitCode = 0, StdOut = listSdks });
+            return dotnet;
         }
 
         [Fact]
-        public void EvaluateProjects_ProjectThatFailsToEvaluate_GetsItsErrorAndDoesNotAffectOthers()
+        public void GetSdkDirectory_IsTheSdkTheDotnetCliSelects()
         {
-            var project1 = XFS.Path(@"c:\P1\P1.csproj");
-            var project2 = XFS.Path(@"c:\P2\P2.csproj");
-            var dotnet = new Mock<IDotnetCommandService>();
-            dotnet
-                .Setup(m => m.Run(It.IsAny<string>()))
-                .Returns(new DotnetCommandResult
-                {
-                    ExitCode = 1,
-                    StdOut = TargetResult(new { Identity = project1, Version = "4.5.6", PackageId = "P1", PackageReference = "" }),
-                    StdErr = project2 + "(1,34): error MSB4019: The imported project \"missing.props\" was not found."
-                });
+            // e.g. global.json selects 8.0.400, although 10.0.100 is installed as well
+            var dotnet = MockDotnet(
+                new DotnetCommandResult { ExitCode = 0, StdOut = "8.0.400" + Environment.NewLine },
+                string.Join(Environment.NewLine, $"8.0.100 [{Sdks}]", $"8.0.400 [{Sdks}]", $"10.0.100 [{Sdks}]", ""));
 
-            var results = new ProjectEvaluationService(new MockFileSystem(), dotnet.Object)
-                .EvaluateProjects(new[] { project1, project2 }, PropertyNames, ItemTypes, null, null);
+            var sdkDirectory = new ProjectEvaluationService(new MockFileSystem(), dotnet.Object).GetSdkDirectory();
 
-            Assert.True(results[project1].Success);
-            Assert.False(results[project2].Success);
-            Assert.Contains("MSB4019", results[project2].ErrorMessage, StringComparison.Ordinal);
+            Assert.True(sdkDirectory.Success, sdkDirectory.ErrorMessage);
+            Assert.Equal(XFS.Path(@"c:\dotnet\sdk\8.0.400"), sdkDirectory.Result);
         }
 
         [Fact]
-        public void EvaluateProjects_DotnetFails_EveryProjectGetsTheError()
+        public void EvaluateProjects_SdkNeedsNewerRuntime_EveryProjectGetsAnError()
         {
-            var project1 = XFS.Path(@"c:\P1\P1.csproj");
-            var project2 = XFS.Path(@"c:\P2\P2.csproj");
-            var dotnet = new Mock<IDotnetCommandService>();
-            dotnet
-                .Setup(m => m.Run(It.IsAny<string>()))
-                .Returns(new DotnetCommandResult { ExitCode = 1, StdOut = "MSBUILD : error MSB1001: Unknown switch.", StdErr = "" });
+            // e.g. CycloneDX runs on .NET 8, but the dotnet CLI uses the .NET 10 SDK, whose MSBuild needs .NET 10
+            var sdkVersion = $"{Environment.Version.Major + 1}.0.100";
+            var dotnet = MockDotnet(new DotnetCommandResult { ExitCode = 0, StdOut = sdkVersion }, $"{sdkVersion} [{Sdks}]");
+            var projects = new[] { XFS.Path(@"c:\P1\P1.csproj"), XFS.Path(@"c:\P2\P2.csproj") };
 
             var results = new ProjectEvaluationService(new MockFileSystem(), dotnet.Object)
-                .EvaluateProjects(new[] { project1, project2 }, PropertyNames, ItemTypes, null, null);
+                .EvaluateProjects(projects, PropertyNames, ItemTypes, null, null);
 
-            Assert.All(new[] { project1, project2 }, project =>
+            Assert.All(projects, project => Assert.Equal(
+                $"The MSBuild of the .NET SDK {sdkVersion} cannot run on .NET {Environment.Version}, which runs CycloneDX",
+                results[project].ErrorMessage));
+        }
+
+        [Fact]
+        public void EvaluateProjects_DotnetCliFindsNoSdk_EveryProjectGetsTheErrorOnOneLine()
+        {
+            // e.g. global.json requests an SDK that is not installed
+            var dotnet = MockDotnet(new DotnetCommandResult
             {
-                Assert.False(results[project].Success);
-                Assert.Contains("MSB1001", results[project].ErrorMessage, StringComparison.Ordinal);
+                ExitCode = 155,
+                StdOut = $"10.0.100 [{Sdks}]",
+                StdErr = string.Join(Environment.NewLine, "A compatible .NET SDK was not found.", "", "Requested SDK version: 99.0.100", "")
             });
-        }
+            var projects = new[] { XFS.Path(@"c:\P1\P1.csproj"), XFS.Path(@"c:\P2\P2.csproj") };
 
-        [Fact]
-        public void EvaluateProjects_EscapesProjectPathsForMsbuild()
-        {
-            var project = XFS.Path(@"c:\100% R&D;$(Odd)\P.csproj");
-            var fileSystem = new MockFileSystem();
-            string generatedProject = null;
-            var dotnet = new Mock<IDotnetCommandService>();
-            dotnet
-                .Setup(m => m.Run(It.IsAny<string>()))
-                .Callback<string>(arguments => generatedProject = fileSystem.File.ReadAllText(arguments.Split('"')[1]))
-                .Returns(new DotnetCommandResult { ExitCode = 0, StdOut = TargetResult() });
+            var results = new ProjectEvaluationService(new MockFileSystem(), dotnet.Object)
+                .EvaluateProjects(projects, PropertyNames, ItemTypes, null, null);
 
-            new ProjectEvaluationService(fileSystem, dotnet.Object).EvaluateProjects(new[] { project }, PropertyNames, ItemTypes, null, null);
-
-            Assert.Contains("100%25 R&amp;D%3B%24(Odd)", generatedProject, StringComparison.Ordinal);
-            Assert.Empty(fileSystem.AllFiles);
+            Assert.All(projects, project => Assert.Equal(
+                "Could not determine the .NET SDK: A compatible .NET SDK was not found. Requested SDK version: 99.0.100",
+                results[project].ErrorMessage));
         }
 
         // -----------------------------------------------------------------------
@@ -236,5 +198,23 @@ namespace CycloneDX.Tests
             Assert.StartsWith("error MSB3202", results[paths[4]].ErrorMessage, StringComparison.Ordinal);
             Assert.All(paths.Skip(1), path => Assert.False(results[path].Success, path));
         }
+
+        [Fact]
+        public void EvaluateProjects_Dotnet_DoesNotChangeTheEnvironment()
+        {
+            // The dotnet processes started later, e.g. for dotnet restore, inherit it and must use their own SDK
+            var project = WriteProject("App", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
+            var environment = GetEnvironment();
+
+            var result = Evaluate(new[] { project })[project];
+
+            Assert.True(result.Success, result.ErrorMessage);
+            Assert.Equal(environment, GetEnvironment());
+        }
+
+        private static SortedDictionary<string, string> GetEnvironment()
+            => new SortedDictionary<string, string>(
+                Environment.GetEnvironmentVariables().Cast<DictionaryEntry>().ToDictionary(entry => (string)entry.Key, entry => (string)entry.Value),
+                StringComparer.Ordinal);
     }
 }
