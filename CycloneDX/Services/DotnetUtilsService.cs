@@ -177,8 +177,10 @@ namespace CycloneDX.Services
         /// <summary>
         /// Evaluates the given properties with MSBuild, so that values from imports such as
         /// Directory.Build.props, property references and conditions are resolved.
+        /// Framework and configuration are passed like in <see cref="Restore(string, string, string, string)"/>,
+        /// so the evaluation sees the same global properties as the restore.
         /// </summary>
-        public DotnetUtilsResult<Dictionary<string, string>> GetProjectProperties(string projectFilePath, IEnumerable<string> propertyNames)
+        public DotnetUtilsResult<Dictionary<string, string>> GetProjectProperties(string projectFilePath, IEnumerable<string> propertyNames, string framework, string configuration)
         {
             var names = propertyNames?.Where(name => !string.IsNullOrWhiteSpace(name)).ToList() ?? new List<string>();
             if (string.IsNullOrWhiteSpace(projectFilePath) || names.Count == 0)
@@ -189,14 +191,24 @@ namespace CycloneDX.Services
                 };
             }
 
-            var getProperties = string.Join(" ", names.Select(name => $"-getProperty:{name}"));
-            var commandResult = _dotnetCommandService.Run($"msbuild \"{projectFilePath}\" -nologo -v:quiet {getProperties}");
+            var arguments = $"msbuild \"{projectFilePath}\" -nologo -v:quiet {string.Join(" ", names.Select(name => $"-getProperty:{name}"))}";
+            if (!string.IsNullOrEmpty(framework))
+            {
+                arguments = $"{arguments} -p:TargetFramework={framework}";
+            }
+            if (!string.IsNullOrEmpty(configuration))
+            {
+                arguments = $"{arguments} -p:Configuration={configuration}";
+            }
+            var commandResult = _dotnetCommandService.Run(arguments);
 
             if (!commandResult.Success)
             {
+                // MSBuild writes some errors (e.g. unknown switches of older SDKs) to stdout
+                var errorOutput = string.IsNullOrWhiteSpace(commandResult.StdErr) ? commandResult.StdOut : commandResult.StdErr;
                 return new DotnetUtilsResult<Dictionary<string, string>>
                 {
-                    ErrorMessage = commandResult.StdErr ?? commandResult.StdOut ?? $"Unable to evaluate properties of {projectFilePath}"
+                    ErrorMessage = string.IsNullOrWhiteSpace(errorOutput) ? $"Unable to evaluate properties of {projectFilePath}" : errorOutput
                 };
             }
 

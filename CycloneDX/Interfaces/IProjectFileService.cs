@@ -24,6 +24,8 @@ namespace CycloneDX.Interfaces
     public interface IProjectFileService
     {
         bool DisablePackageRestore { get; set; }
+        string EvaluationFramework { get; set; }
+        string EvaluationConfiguration { get; set; }
         Task<HashSet<DotnetDependency>> GetProjectDotnetDependencysAsync(string projectFilePath, string baseIntermediateOutputPath, bool excludeTestProjects, string framework, string runtime);
         Task<HashSet<DotnetDependency>> GetProjectDotnetDependencysAsync(string projectFilePath, string baseIntermediateOutputPath, bool excludeTestProjects, string framework, string runtime, string configuration);
         Task<HashSet<string>> GetProjectReferencesAsync(string projectFilePath);

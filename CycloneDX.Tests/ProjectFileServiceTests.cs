@@ -896,7 +896,7 @@ namespace CycloneDX.Tests
             });
             var dotnetUtils = new Mock<IDotnetUtilsService>();
             dotnetUtils
-                .Setup(m => m.GetProjectProperties(XFS.Path(@"c:\P\P.csproj"), It.IsAny<IEnumerable<string>>()))
+                .Setup(m => m.GetProjectProperties(XFS.Path(@"c:\P\P.csproj"), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()))
                 .Returns(evaluatedProperties is null
                     ? new DotnetUtilsResult<Dictionary<string, string>> { ErrorMessage = "MSB1009: Project file does not exist." }
                     : new DotnetUtilsResult<Dictionary<string, string>> { Result = evaluatedProperties });
@@ -997,7 +997,7 @@ namespace CycloneDX.Tests
             svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
             svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
 
-            dotnetUtils.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>()), Times.Once);
+            dotnetUtils.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()), Times.Once);
         }
     }
 }

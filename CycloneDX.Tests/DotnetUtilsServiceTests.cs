@@ -222,7 +222,7 @@ namespace CycloneDX.Tests
             var dotnetUtilsService = new DotnetUtilsService(
                 new MockFileSystem(), dotnetCommandService.Object);
 
-            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" });
+            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" }, null, null);
 
             Assert.True(result.Success);
             Assert.Equal("4.5.6", result.Result["Version"]);
@@ -243,7 +243,7 @@ namespace CycloneDX.Tests
             var dotnetUtilsService = new DotnetUtilsService(
                 new MockFileSystem(), dotnetCommandService.Object);
 
-            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version" });
+            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version" }, null, null);
 
             Assert.True(result.Success);
             Assert.Equal("4.5.6", result.Result["Version"]);
@@ -260,7 +260,7 @@ namespace CycloneDX.Tests
             var dotnetUtilsService = new DotnetUtilsService(
                 new MockFileSystem(), dotnetCommandService.Object);
 
-            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" });
+            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" }, null, null);
 
             Assert.False(result.Success);
         }
@@ -276,7 +276,7 @@ namespace CycloneDX.Tests
             var dotnetUtilsService = new DotnetUtilsService(
                 new MockFileSystem(), dotnetCommandService.Object);
 
-            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" });
+            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" }, null, null);
 
             Assert.False(result.Success);
         }

@@ -95,6 +95,8 @@ namespace CycloneDX
 
             dotnetCommandService.TimeoutMilliseconds = dotnetCommandTimeout;
             projectFileService.DisablePackageRestore = disablePackageRestore;
+            projectFileService.EvaluationFramework = framework;
+            projectFileService.EvaluationConfiguration = configuration;
 
             // retrieve nuget package cache paths
             var packageCachePathsResult = dotnetUtilsService.GetPackageCachePaths();

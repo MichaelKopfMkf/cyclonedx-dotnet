@@ -75,11 +75,38 @@ namespace CycloneDX.Services
         {
             if (!_evaluatedProperties.TryGetValue(projectFilePath, out var properties))
             {
-                var result = _dotnetUtilsService?.GetProjectProperties(projectFilePath, EvaluatedPropertyNames);
-                properties = result is { Success: true, Result: not null } ? result.Result : new Dictionary<string, string>();
+                var result = _dotnetUtilsService?.GetProjectProperties(projectFilePath, EvaluatedPropertyNames, EvaluationFramework, EvaluationConfiguration);
+                if (result is { Success: true, Result: not null })
+                {
+                    properties = result.Result;
+                }
+                else
+                {
+                    properties = new Dictionary<string, string>();
+                    WriteEvaluationFallbackNotice(projectFilePath, result?.ErrorMessage);
+                }
                 _evaluatedProperties[projectFilePath] = properties;
             }
             return properties;
+        }
+
+        /// <summary>
+        /// Without this notice users cannot tell why values from e.g. Directory.Build.props are ignored.
+        /// Names the project, because referenced projects are evaluated while another one is analyzed.
+        /// </summary>
+        private static void WriteEvaluationFallbackNotice(string projectFilePath, string errorMessage)
+        {
+            var errorLines = (errorMessage ?? string.Empty)
+                .Split('\n')
+                .Select(line => line.Trim())
+                .Where(line => line.Length > 0)
+                .ToList();
+            var reason = errorLines.FirstOrDefault(line => line.Contains("error", StringComparison.OrdinalIgnoreCase)) ?? errorLines.FirstOrDefault();
+
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine($"  Could not evaluate properties of {Path.GetFileName(projectFilePath)} with MSBuild, reading the project file instead"
+                + (reason is null ? "" : $": {reason}"));
+            Console.ResetColor();
         }
 
         private string GetEvaluatedProperty(string projectFilePath, string propertyName)
@@ -233,6 +260,12 @@ namespace CycloneDX.Services
         }
 
         public bool DisablePackageRestore { get; set; }
+
+        /// <summary>Target framework passed to MSBuild when evaluating project properties.</summary>
+        public string EvaluationFramework { get; set; }
+
+        /// <summary>Configuration passed to MSBuild when evaluating project properties.</summary>
+        public string EvaluationConfiguration { get; set; }
 
         /// <summary>
         /// Analyzes a single Project file for NuGet package references.

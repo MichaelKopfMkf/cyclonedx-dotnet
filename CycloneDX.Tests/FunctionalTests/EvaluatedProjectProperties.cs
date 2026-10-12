@@ -58,8 +58,8 @@ namespace CycloneDX.Tests.FunctionalTests
                 .Setup(m => m.GetAssetsPath(It.IsAny<string>()))
                 .Returns(new DotnetUtilsResult<string> { ErrorMessage = "no assets file" });
             dotnetUtilsService
-                .Setup(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>()))
-                .Returns((string path, IEnumerable<string> _) => new DotnetUtilsResult<Dictionary<string, string>> { Result = evaluatedProperties[Path.GetFileNameWithoutExtension(path)] });
+                .Setup(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>(), It.IsAny<string>(), It.IsAny<string>()))
+                .Returns((string path, IEnumerable<string> _, string _, string _) => new DotnetUtilsResult<Dictionary<string, string>> { Result = evaluatedProperties[Path.GetFileNameWithoutExtension(path)] });
             return dotnetUtilsService.Object;
         }
 
