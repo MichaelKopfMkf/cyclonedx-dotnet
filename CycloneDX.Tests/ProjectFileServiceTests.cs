@@ -882,5 +882,122 @@ namespace CycloneDX.Tests
 
             Assert.Equal("Widgets", name);
         }
+
+        // -----------------------------------------------------------------------
+        // MSBuild evaluation — properties from Directory.Build.props and other imports
+        // -----------------------------------------------------------------------
+
+        private static (ProjectFileService service, Mock<IDotnetUtilsService> dotnetUtils) CreateProjectFileServiceWithEvaluatedProperties(
+            string csproj, Dictionary<string, string> evaluatedProperties)
+        {
+            var mockFileSystem = new MockFileSystem(new Dictionary<string, MockFileData>
+            {
+                { XFS.Path(@"c:\P\P.csproj"), new MockFileData(csproj) }
+            });
+            var dotnetUtils = new Mock<IDotnetUtilsService>();
+            dotnetUtils
+                .Setup(m => m.GetProjectProperties(XFS.Path(@"c:\P\P.csproj"), It.IsAny<IEnumerable<string>>()))
+                .Returns(evaluatedProperties is null
+                    ? new DotnetUtilsResult<Dictionary<string, string>> { ErrorMessage = "MSB1009: Project file does not exist." }
+                    : new DotnetUtilsResult<Dictionary<string, string>> { Result = evaluatedProperties });
+            var service = new ProjectFileService(
+                mockFileSystem,
+                dotnetUtils.Object,
+                new Mock<IPackagesFileService>().Object,
+                new Mock<IProjectAssetsFileService>().Object);
+            return (service, dotnetUtils);
+        }
+
+        [Fact]
+        public void GetAssemblyNameAndVersion_UsesMsbuildEvaluatedVersionAndPackageId()
+        {
+            var (svc, _) = CreateProjectFileServiceWithEvaluatedProperties(
+                "<Project><PropertyGroup><Version>$(Major).5.6</Version></PropertyGroup></Project>",
+                new Dictionary<string, string>
+                {
+                    ["Version"] = "4.5.6",
+                    ["PackageId"] = "Contoso.Package",
+                    ["AssemblyName"] = "Contoso.Assembly",
+                    ["IsTestProject"] = ""
+                });
+
+            var (name, version) = svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
+
+            Assert.Equal("Contoso.Package", name);
+            Assert.Equal("4.5.6", version);
+        }
+
+        [Fact]
+        public void GetAssemblyNameAndVersion_EvaluatedPackageIdMissing_UsesEvaluatedAssemblyName()
+        {
+            var (svc, _) = CreateProjectFileServiceWithEvaluatedProperties(
+                "<Project><PropertyGroup /></Project>",
+                new Dictionary<string, string> { ["Version"] = "4.5.6", ["PackageId"] = "", ["AssemblyName"] = "Contoso.Assembly" });
+
+            var (name, _) = svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
+
+            Assert.Equal("Contoso.Assembly", name);
+        }
+
+        [Fact]
+        public void GetAssemblyNameAndVersion_EvaluatedSdkDefaultVersion_KeepsProjectFileFallback()
+        {
+            // SDK-style projects always evaluate Version to 1.0.0 when nothing sets it, so 1.0.0
+            // must not override the existing fallbacks (AssemblyInfo, tool default 0.0.0).
+            var (svc, _) = CreateProjectFileServiceWithEvaluatedProperties(
+                "<Project><PropertyGroup /></Project>",
+                new Dictionary<string, string> { ["Version"] = "1.0.0", ["PackageId"] = "P", ["AssemblyName"] = "P" });
+
+            var (_, version) = svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
+
+            Assert.Null(version);
+        }
+
+        [Fact]
+        public void GetAssemblyNameAndVersion_EvaluationFails_FallsBackToProjectFile()
+        {
+            var (svc, _) = CreateProjectFileServiceWithEvaluatedProperties(
+                "<Project><PropertyGroup><AssemblyName>FromXml</AssemblyName><Version>1.2.3</Version></PropertyGroup></Project>",
+                null);
+
+            var (name, version) = svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
+
+            Assert.Equal("FromXml", name);
+            Assert.Equal("1.2.3", version);
+        }
+
+        [Fact]
+        public void IsTestProject_UsesMsbuildEvaluatedIsTestProject()
+        {
+            var (svc, _) = CreateProjectFileServiceWithEvaluatedProperties(
+                "<Project><PropertyGroup /></Project>",
+                new Dictionary<string, string> { ["IsTestProject"] = "true" });
+
+            Assert.True(svc.IsTestProject(XFS.Path(@"c:\P\P.csproj")));
+        }
+
+        [Fact]
+        public void IsTestProject_EvaluationFails_FallsBackToProjectFile()
+        {
+            var (svc, _) = CreateProjectFileServiceWithEvaluatedProperties(
+                "<Project><PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup></Project>",
+                null);
+
+            Assert.True(svc.IsTestProject(XFS.Path(@"c:\P\P.csproj")));
+        }
+
+        [Fact]
+        public void EvaluatedProperties_AreRequestedOncePerProject()
+        {
+            var (svc, dotnetUtils) = CreateProjectFileServiceWithEvaluatedProperties(
+                "<Project><PropertyGroup /></Project>",
+                new Dictionary<string, string> { ["Version"] = "4.5.6", ["IsTestProject"] = "" });
+
+            svc.IsTestProject(XFS.Path(@"c:\P\P.csproj"));
+            svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
+            svc.GetAssemblyNameAndVersion(XFS.Path(@"c:\P\P.csproj"));
+
+            dotnetUtils.Verify(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>()), Times.Once);
+        }
     }
 }

@@ -204,5 +204,81 @@ namespace CycloneDX.Tests
 
             Assert.Contains("-p:Configuration=Release", capturedArguments);
         }
+
+        [Fact]
+        public void GetProjectProperties_ReturnsPropertiesEvaluatedByMsbuild()
+        {
+            string capturedArguments = null;
+            var dotnetCommandService = new Mock<IDotnetCommandService>();
+            dotnetCommandService
+                .Setup(m => m.Run(It.IsAny<string>()))
+                .Callback<string>(args => capturedArguments = args)
+                .Returns(new DotnetCommandResult
+                {
+                    ExitCode = 0,
+                    StdOut = "{\n  \"Properties\": {\n    \"Version\": \"4.5.6\",\n    \"PackageId\": \"Contoso.App\"\n  }\n}\n"
+                });
+
+            var dotnetUtilsService = new DotnetUtilsService(
+                new MockFileSystem(), dotnetCommandService.Object);
+
+            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" });
+
+            Assert.True(result.Success);
+            Assert.Equal("4.5.6", result.Result["Version"]);
+            Assert.Equal("Contoso.App", result.Result["PackageId"]);
+            Assert.StartsWith($"msbuild \"{XFS.Path(@"c:\Project\Project.csproj")}\"", capturedArguments);
+            Assert.Contains("-getProperty:Version", capturedArguments);
+            Assert.Contains("-getProperty:PackageId", capturedArguments);
+        }
+
+        [Fact]
+        public void GetProjectProperties_SingleProperty_ReturnsPlainOutputValue()
+        {
+            var dotnetCommandService = new Mock<IDotnetCommandService>();
+            dotnetCommandService
+                .Setup(m => m.Run(It.IsAny<string>()))
+                .Returns(new DotnetCommandResult { ExitCode = 0, StdOut = "4.5.6\r\n" });
+
+            var dotnetUtilsService = new DotnetUtilsService(
+                new MockFileSystem(), dotnetCommandService.Object);
+
+            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version" });
+
+            Assert.True(result.Success);
+            Assert.Equal("4.5.6", result.Result["Version"]);
+        }
+
+        [Fact]
+        public void GetProjectProperties_MsbuildFails_ReturnsError()
+        {
+            var dotnetCommandService = new Mock<IDotnetCommandService>();
+            dotnetCommandService
+                .Setup(m => m.Run(It.IsAny<string>()))
+                .Returns(new DotnetCommandResult { ExitCode = 1, StdOut = "MSBUILD : error MSB1009: Project file does not exist." });
+
+            var dotnetUtilsService = new DotnetUtilsService(
+                new MockFileSystem(), dotnetCommandService.Object);
+
+            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" });
+
+            Assert.False(result.Success);
+        }
+
+        [Fact]
+        public void GetProjectProperties_UnexpectedOutput_ReturnsError()
+        {
+            var dotnetCommandService = new Mock<IDotnetCommandService>();
+            dotnetCommandService
+                .Setup(m => m.Run(It.IsAny<string>()))
+                .Returns(new DotnetCommandResult { ExitCode = 0, StdOut = "not json" });
+
+            var dotnetUtilsService = new DotnetUtilsService(
+                new MockFileSystem(), dotnetCommandService.Object);
+
+            var result = dotnetUtilsService.GetProjectProperties(XFS.Path(@"c:\Project\Project.csproj"), new[] { "Version", "PackageId" });
+
+            Assert.False(result.Success);
+        }
     }
 }

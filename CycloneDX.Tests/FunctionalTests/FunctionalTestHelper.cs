@@ -45,6 +45,25 @@ namespace CycloneDX.Tests.FunctionalTests
             return mockNugetServiceFactory.Object;
         }
 
+        /// <summary>
+        /// The projects of the functional tests only exist in the mock file system, so the real
+        /// MSBuild cannot evaluate them. Fail msbuild calls right away instead of starting a
+        /// dotnet process per project; all other dotnet commands run as usual.
+        /// </summary>
+        private static IDotnetCommandService CreateDotnetCommandServiceWithoutMsbuild()
+        {
+            var dotnetCommandService = new DotnetCommandService();
+            var mockDotnetCommandService = new Mock<IDotnetCommandService>();
+            mockDotnetCommandService.SetupGet(m => m.TimeoutMilliseconds).Returns(() => dotnetCommandService.TimeoutMilliseconds);
+            mockDotnetCommandService.SetupSet(m => m.TimeoutMilliseconds = It.IsAny<int>())
+                .Callback<int>(timeout => dotnetCommandService.TimeoutMilliseconds = timeout);
+            mockDotnetCommandService.Setup(m => m.Run(It.IsAny<string>()))
+                .Returns((string arguments) => arguments.StartsWith("msbuild ", StringComparison.Ordinal)
+                    ? new DotnetCommandResult { ExitCode = 1, StdErr = "MSBuild cannot evaluate projects of the mock file system" }
+                    : dotnetCommandService.Run(arguments));
+            return mockDotnetCommandService.Object;
+        }
+
 
         public static async Task<Bom> Test(string assetsJson, RunOptions options,
             ExitCode expectedExitCode = ExitCode.OK) => await Test(assetsJson, options, null, expectedExitCode);
@@ -74,14 +93,23 @@ namespace CycloneDX.Tests.FunctionalTests
             mockFileSystem, expectedExitCode);
 
 
+        public static async Task<Bom> Test(RunOptions options, IDotnetUtilsService dotnetUtilsService, MockFileSystem mockFileSystem)
+            => await Test(options, CreateMockNugetServiceFactory(), dotnetUtilsService, mockFileSystem, ExitCode.OK).ConfigureAwait(false);
+
+
         public static async Task<Bom> Test(RunOptions options, INugetServiceFactory nugetService, MockFileSystem mockFileSystem, ExitCode expectedExitCode = ExitCode.OK)
+            => await Test(options, nugetService, null, mockFileSystem, expectedExitCode).ConfigureAwait(false);
+
+
+        private static async Task<Bom> Test(RunOptions options, INugetServiceFactory nugetService, IDotnetUtilsService dotnetUtilsService, MockFileSystem mockFileSystem, ExitCode expectedExitCode)
         {
             options.enableGithubLicenses = true;
             options.outputDirectory ??= "/bom/";
             options.SolutionOrProjectFile ??= MockUnixSupport.Path("c:/ProjectPath/Project.csproj");
             options.disablePackageRestore = true;
 
-            Runner runner = new Runner(mockFileSystem, null, null, null, null, null, null, nugetService);
+            var dotnetCommandService = dotnetUtilsService is null ? CreateDotnetCommandServiceWithoutMsbuild() : null;
+            Runner runner = new Runner(mockFileSystem, dotnetCommandService, null, dotnetUtilsService, null, null, null, nugetService);
             int exitCode = await runner.HandleCommandAsync(options);
 
             Assert.Equal((int)expectedExitCode, exitCode);

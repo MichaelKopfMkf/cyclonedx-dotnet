@@ -1,0 +1,98 @@
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Abstractions.TestingHelpers;
+using System.Linq;
+using System.Threading.Tasks;
+using CycloneDX.Interfaces;
+using CycloneDX.Models;
+using Moq;
+using Xunit;
+
+namespace CycloneDX.Tests.FunctionalTests
+{
+    /// <summary>
+    /// Properties set outside the project file (e.g. in Directory.Build.props) are only visible
+    /// through MSBuild evaluation. The project files below intentionally lack them or contain
+    /// unresolved property references; the evaluated values come from IDotnetUtilsService.
+    /// </summary>
+    public class EvaluatedProjectProperties
+    {
+        private static readonly string AppPath = MockUnixSupport.Path("c:/repo/Foo.Bar.App/Foo.Bar.App.csproj");
+        private static readonly string LibPath = MockUnixSupport.Path("c:/repo/Foo.Bar.Lib/Foo.Bar.Lib.csproj");
+
+        private static MockFileSystem GetMockFS()
+        {
+            return new MockFileSystem(new Dictionary<string, MockFileData>
+            {
+                {
+                    AppPath,
+                    new MockFileData(
+                        "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>" +
+                        "<ItemGroup><ProjectReference Include=\"..\\Foo.Bar.Lib\\Foo.Bar.Lib.csproj\" /></ItemGroup></Project>")
+                },
+                {
+                    LibPath,
+                    new MockFileData("<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><Version>$(LibMajor).0.0</Version></PropertyGroup></Project>")
+                },
+                {
+                    MockUnixSupport.Path("c:/repo/Foo.Bar.Lib/packages.config"),
+                    new MockFileData("<?xml version=\"1.0\" encoding=\"utf-8\"?><packages><package id=\"log4net\" version=\"2.0.15\" /></packages>")
+                }
+            });
+        }
+
+        private static IDotnetUtilsService GetDotnetUtilsService()
+        {
+            // keyed by project name, the runner passes normalized full paths
+            var evaluatedProperties = new Dictionary<string, Dictionary<string, string>>
+            {
+                ["Foo.Bar.App"] = new() { ["Version"] = "4.5.6", ["PackageId"] = "Contoso.Foo.Bar.App", ["AssemblyName"] = "Contoso.Foo.Bar.App", ["IsTestProject"] = "" },
+                ["Foo.Bar.Lib"] = new() { ["Version"] = "7.0.0", ["PackageId"] = "Contoso.Foo.Bar.Lib", ["AssemblyName"] = "Contoso.Foo.Bar.Lib", ["IsTestProject"] = "" }
+            };
+
+            var dotnetUtilsService = new Mock<IDotnetUtilsService>();
+            dotnetUtilsService
+                .Setup(m => m.GetPackageCachePaths())
+                .Returns(new DotnetUtilsResult<List<string>> { Result = new List<string> { MockUnixSupport.Path("c:/nuget/packages") } });
+            dotnetUtilsService
+                .Setup(m => m.GetAssetsPath(It.IsAny<string>()))
+                .Returns(new DotnetUtilsResult<string> { ErrorMessage = "no assets file" });
+            dotnetUtilsService
+                .Setup(m => m.GetProjectProperties(It.IsAny<string>(), It.IsAny<IEnumerable<string>>()))
+                .Returns((string path, IEnumerable<string> _) => new DotnetUtilsResult<Dictionary<string, string>> { Result = evaluatedProperties[Path.GetFileNameWithoutExtension(path)] });
+            return dotnetUtilsService.Object;
+        }
+
+        [Fact]
+        public async Task RootVersionIsEvaluatedByMsbuild()
+        {
+            var options = new RunOptions { SolutionOrProjectFile = AppPath };
+
+            var bom = await FunctionalTestHelper.Test(options, GetDotnetUtilsService(), GetMockFS());
+
+            Assert.Equal("4.5.6", bom.Metadata.Component.Version);
+        }
+
+        [Fact]
+        public async Task RecursiveProjectReferencesUseEvaluatedPackageIdAndVersion()
+        {
+            var options = new RunOptions
+            {
+                scanProjectReferences = true,
+                includeProjectReferences = true,
+                setNugetPurl = true,
+                SolutionOrProjectFile = AppPath
+            };
+
+            var bom = await FunctionalTestHelper.Test(options, GetDotnetUtilsService(), GetMockFS());
+
+            var lib = Assert.Single(bom.Components, c => c.Type == Component.Classification.Library && c.Name != "log4net");
+            Assert.Equal("Contoso.Foo.Bar.Lib", lib.Name);
+            Assert.Equal("7.0.0", lib.Version);
+            Assert.Equal("pkg:nuget/Contoso.Foo.Bar.Lib@7.0.0", lib.Purl);
+            Assert.DoesNotContain(bom.Components, c => c.Version.Contains("$("));
+            FunctionalTestHelper.AssertHasDependencyWithChild(bom, "pkg:nuget/Foo.Bar.App@4.5.6", "pkg:nuget/Contoso.Foo.Bar.Lib@7.0.0");
+            FunctionalTestHelper.AssertHasDependencyWithChild(bom, "pkg:nuget/Contoso.Foo.Bar.Lib@7.0.0", "pkg:nuget/log4net@2.0.15");
+        }
+    }
+}
