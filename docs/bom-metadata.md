@@ -104,10 +104,10 @@ only set for `Release`) resolve as in that build.
 
 MSBuild evaluates `Version` to `1.0.0` when nothing sets it, which cannot be told
 apart from an explicit `1.0.0`. In that case, or when the evaluation fails (e.g. because an
-import cannot be resolved, or the .NET SDK is older than 8), the tool reads the version from the
-project file XML instead; a failed evaluation prints a notice naming the project and the MSBuild
-error. It checks the following XML properties in priority order, using the first one that has a
-value:
+import cannot be resolved, or the .NET SDK is newer than the .NET runtime that runs the tool), the
+tool reads the version from the project file XML instead; a failed evaluation prints a notice
+naming the project and the MSBuild error. It checks the following XML properties in priority
+order, using the first one that has a value:
 
 | Priority | Property | Typical use |
 |---|---|---|

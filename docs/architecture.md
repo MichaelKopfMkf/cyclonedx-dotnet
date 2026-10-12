@@ -70,19 +70,22 @@ listed project are included.
 
 Project properties are evaluated by MSBuild, so values from imports such as
 `Directory.Build.props`, property references and conditions are resolved. Every project found so
-far (the projects of a solution, discovered project references) is evaluated in the same
-`dotnet msbuild` call, using the .NET SDK the dotnet CLI resolves for the working directory
-(honoring `global.json`; .NET 8 SDK or newer). A generated helper project calls a target in each
-project that returns the evaluated `Version`, `PackageId`, `AssemblyName`, `IsTestProject` and
-`ProjectAssetsFile` properties and the `PackageReference` items. The target is added through the
-SDK hooks `CustomAfterMicrosoftCommonTargets` and `CustomAfterMicrosoftCommonCrossTargetingTargets`.
-A project that sets one of these properties itself is evaluated without its own file.
-`--configuration` and `--framework` are passed as the global properties `Configuration` and
-`TargetFramework`, like to `dotnet restore`.
+far (the projects of a solution, discovered project references) is evaluated in the same batch,
+in-process with the MSBuild of the .NET SDK the dotnet CLI resolves for the working directory
+(`dotnet --version`, honoring `global.json`). MSBuild and the other assemblies of that SDK are
+loaded from the SDK directory into an assembly load context of their own, so that they get the
+versions they were built with instead of those CycloneDX ships (e.g. `NuGet.Frameworks`). No
+environment variables are set, so the `dotnet` processes CycloneDX starts select their SDK as
+before. The evaluation reads the `Version`, `PackageId`, `AssemblyName`, `IsTestProject` and
+`ProjectAssetsFile` properties and the `PackageReference` items. `--configuration` and
+`--framework` are passed as the global properties `Configuration` and `TargetFramework`, like to
+`dotnet restore`.
 
-A project that cannot be evaluated (e.g. a missing import, or an older SDK) does not affect the
-others. Its values are read from the project file XML instead, and a notice with the MSBuild
-error is printed. Project references are always read from the project file XML.
+A project that cannot be evaluated (e.g. a missing import) does not affect the others. Its values
+are read from the project file XML instead, and a notice with the MSBuild error is printed. The
+same applies to all projects when the MSBuild of the SDK cannot run on the .NET runtime that runs
+CycloneDX, which is the case when the SDK is newer (e.g. the .NET 10 SDK and the `net8.0` build
+of the tool). Project references are always read from the project file XML.
 
 ---
 

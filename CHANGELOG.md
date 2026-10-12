@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Directory.Build.props` and other imports, property references and `VersionPrefix` are honored.
   Previously only literal values in the project file were read, which produced `0.0.0` root
   versions, duplicate `-rs -ipr` project nodes with unresolved `$(…)` versions, and test projects
-  missed by `--exclude-test-projects`. All projects are evaluated together in one
-  `dotnet msbuild` call (.NET 8 SDK or newer), with `--configuration` and `--framework` applied.
+  missed by `--exclude-test-projects`. The projects are evaluated together in-process with the
+  MSBuild of the .NET SDK the dotnet CLI uses, loaded into its own assembly load context, with
+  `--configuration` and `--framework` applied; the SDK must not be newer than the .NET runtime
+  that runs CycloneDX.
   A project that cannot be evaluated, or evaluates to the SDK default `1.0.0`, is read from the
   project file as before; a failed evaluation prints a notice with the MSBuild error
 
